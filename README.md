@@ -1,4 +1,4 @@
-﻿# pos-tunnel
+# pos-tunnel
 
 On-demand SSH access to Windows POS machines managed by NinjaOne RMM. NinjaOne's API tells a POS to
 dial out to a hardened SSH relay; the operator (or a coding agent on the operator's workstation)
