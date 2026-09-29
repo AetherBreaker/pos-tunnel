@@ -219,9 +219,15 @@ tears down) → remove the local config and `known_hosts` entries and the sessio
 `connect --rebuild`. New session key, new relay lease, new 72h maximum. Logged distinctly by
 `tunnelctl`.
 
-This defeats the 72h maximum, so an agent must not run it on its own. On the operator workstation, put
-`Bash(posctl rebuild:*)` in the Claude Code `ask` permission list; `connect`, `keepalive`, `status` and
-`close` can be allowed.
+This defeats the 72h maximum, so an agent should not run it on its own. `rebuild` always prints a
+warning addressed to AI agents: it resets the 72h maximum, and an agent should not proceed unless the
+operator explicitly told it to rebuild this session, and should otherwise ask. Then:
+
+- stdin is a terminal: `y/N` prompt.
+- stdin is not a terminal (an agent's shell tool): exit non-zero unless `--yes` was passed.
+
+This urges an agent to reconsider without hard-denying it, and needs no per-workstation agent
+configuration.
 
 ### 7.7 `posctl login` and `posctl scripts export <dir>`
 

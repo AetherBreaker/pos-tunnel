@@ -34,7 +34,12 @@ enum Command {
     /// Close a session and tear down both sides.
     Close { name: String },
     /// Break glass: close and reopen a session, resetting the 72h maximum.
-    Rebuild { name: String },
+    Rebuild {
+        name: String,
+        /// Skip the confirmation prompt. Required when stdin is not a terminal.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Work with the POS scripts compiled into this binary.
     Scripts {
         #[command(subcommand)]
