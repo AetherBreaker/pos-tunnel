@@ -15,6 +15,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 # allowed_signers line for the release signing key (namespace pos-tunnel-release).
-$ReleaseSigner = 'pos-tunnel-release namespaces="pos-tunnel-release" ssh-ed25519 <set at first release>'
+$ReleaseSigner = 'pos-tunnel-release namespaces="pos-tunnel-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIP9qXjFiOpPDfreKXkM99hmugRjZdZ7paRjTluIwvRNS'
 
 throw 'not implemented yet'

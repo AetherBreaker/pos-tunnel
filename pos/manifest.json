@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "files": {
+    "Close.ps1": "c3421347913c4347a49778a8ea4815447826e43dd1dfb0f6f9d12a691e1d5726",
+    "Open.ps1": "2198d92369156967fbb71b9af623b9f20d15c45f8e9692d9d801ec7a3e2e9acd",
+    "Setup.ps1": "ab5841c39a48723473cbfd898e620804921bb5a59eda487c14cbf2ef87e93dc2",
+    "Touch.ps1": "faaa3e874da3a789afd8ac773b7eaf3ff83554cf6bfbe6b2fb98d67119e2b2db",
+    "Watch.ps1": "5c181042aa41120f5fdd84933ce42e30ec7514abab9f686e5f364254f0b16375"
+  }
+}
