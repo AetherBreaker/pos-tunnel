@@ -1,0 +1,4 @@
+#!/bin/sh
+# Root cron job, every minute: kills expired and lease-less tunnels. Design: docs/design.md, section 6.5.
+echo 'reaper: not implemented yet' >&2
+exit 1

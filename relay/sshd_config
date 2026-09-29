@@ -1,0 +1,47 @@
+# pos-tunnel relay. Design: docs/design.md, section 6.2.
+# POS machines (user `tunnel`) are untrusted: they may only remote-forward their own port.
+
+Port 2222
+HostKey /data/hostkeys/ssh_host_ed25519_key
+
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+AllowUsers tunnel jump ctl
+AuthorizedKeysFile none
+
+GatewayPorts no
+X11Forwarding no
+AllowAgentForwarding no
+AllowStreamLocalForwarding no
+PermitTunnel no
+PermitUserRC no
+PermitTTY no
+
+ClientAliveInterval 30
+ClientAliveCountMax 3
+LogLevel VERBOSE
+
+# Keys come from tunnelctl's file via tunnel-keys, one restricted line per open session.
+# `remote` (not `yes`) is the isolation control: no -L, so no reaching other POS tunnels.
+Match User tunnel
+    AuthorizedKeysCommand /usr/local/bin/tunnel-keys %u
+    AuthorizedKeysCommandUser keyreader
+    AllowTcpForwarding remote
+    PermitOpen none
+    ForceCommand /sbin/nologin
+
+# Operator ProxyJump into a POS tunnel on loopback.
+Match User jump
+    AuthorizedKeysFile /etc/ssh/operator_keys
+    AllowTcpForwarding local
+    PermitOpen localhost:*
+    PermitListen none
+    ForceCommand /sbin/nologin
+
+# Operator session management.
+Match User ctl
+    AuthorizedKeysFile /etc/ssh/operator_keys
+    AllowTcpForwarding no
+    ForceCommand /usr/local/bin/tunnelctl

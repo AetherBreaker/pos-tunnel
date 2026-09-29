@@ -1,0 +1,11 @@
+[package]
+name = "posctl"
+version = "0.1.0"
+edition = "2024"
+description = "On-demand SSH access to NinjaOne-managed POS machines through a relay"
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+humantime = "2"
