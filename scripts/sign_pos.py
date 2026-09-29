@@ -43,6 +43,8 @@ def package_hashes() -> dict[str, str]:
 
 def check() -> None:
   """Exit non-zero unless the manifest matches the files and carries a valid signature."""
+  if not (MANIFEST.exists() and SIGNATURE.exists() and ALLOWED_SIGNERS.exists()):
+    sys.exit("pos/manifest.json, its .sig or pos/allowed_signers is missing: the package was never signed")
   manifest = json.loads(MANIFEST.read_bytes())
   if manifest["files"] != package_hashes():
     sys.exit("pos/package differs from pos/manifest.json: run `poe sign-pos`")
