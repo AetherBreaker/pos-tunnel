@@ -19,8 +19,9 @@ operator workstation                    relay (VPS container)                 PO
 
 | Component | Where | What |
 |---|---|---|
-| `posctl` | operator workstation | Rust CLI. The only thing a person runs. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. Also embeds the POS scripts and exports them in NinjaOne-ready form. |
-| POS scripts | NinjaOne script library → POS | PowerShell, run as SYSTEM. `Setup` (once per device), `Open`, `Close`, `Touch` (per session, via API). `Setup` installs `Watch`, which owns the session lifecycle on the POS. |
+| `posctl` | operator workstation | Rust CLI. The only thing a person runs. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. |
+| NinjaOne library scripts | NinjaOne → POS | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1. |
+| POS package | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset. |
 | relay | Docker container on the Coolify VPS | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management) and `reaper` (enforcement). |
 
 ## 2. Threat model
@@ -43,6 +44,7 @@ operator workstation                    relay (VPS container)                 PO
 | Session key (ed25519, per session) | operator workstation, session state dir | `Open` script parameter (public keys are safe in NinjaOne activity logs) | `support@POS` for this session only |
 | Operator key | operator workstation | relay env var `OPERATOR_PUBKEY` → `/etc/ssh/operator_keys` (root-owned) at container start | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only) |
 | Relay host key | `/data/hostkeys` on the relay volume (root-only; persisted — a regenerated key breaks every POS's pin) | `Setup` parameter; `posctl` config | POS and operator verify the relay |
+| Release signing key | operator workstation only — never CI, so a compromised GitHub account can't sign | pinned in `Install-PosTunnel` as an `allowed_signers` line | POS package releases (namespace `pos-tunnel-release`) |
 | NinjaOne API client credentials | OS keyring (`posctl login`) | — | running SYSTEM scripts on every POS; treat accordingly |
 
 Custom-field values come from the POS and are untrusted. They can only ever affect that POS's own
@@ -149,10 +151,45 @@ session command, so nothing that runs inside the session could enforce a deadlin
 
 ## 7. Flows
 
-### 7.1 POS setup (once per device, NinjaOne policy)
+### 7.1 Distribution, install and setup
 
-`Setup -RelayHost <host> -RelayPort 2222 -RelayHostKey "<ssh-ed25519 ...>"` (parameters, not
-constants — this repo is public). Idempotent; re-running upgrades in place.
+NinjaOne's API can't create or update library scripts, so the library holds only two scripts that
+never change; the real code ships as a signed GitHub release asset.
+
+**Release** (operator workstation, local release script): zip `pos/package/` →
+`pos-tunnel-pos.zip`; write `manifest.json` (`version`, `sha256` of the zip); sign it with
+`ssh-keygen -Y sign -n pos-tunnel-release` → `manifest.json.sig`; upload all three to the GitHub
+release.
+
+**`Invoke-PosTunnel -Action <Open|Close|Touch> …`** (library): runs
+`versions\<current>\<Action>.ps1` with the remaining arguments. `posctl` runs every per-session action
+through it, so a session never downloads anything.
+
+**`Install-PosTunnel -RelayHost <host> -RelayPort 2222 -RelayHostKey "<ssh-ed25519 ...>" [-Force]`**
+(library; relay values are NinjaOne script variables in the policy, not constants — this repo is
+public). Idempotent: every run converges the device to the latest release and a correct setup, and a
+run with nothing to do changes nothing.
+
+1. If a session is open (`session.json` exists) and `-Force` isn't set: report "deferred", exit 0.
+   Neither an upgrade nor setup repair should change `sshd` or the tasks under a live session.
+2. Download `manifest.json` and `.sig` from the latest release. Verify with `ssh-keygen -Y verify`
+   against the pinned signer (the OpenSSH client ships with Windows 10 and 11). Fail on a bad
+   signature.
+3. Manifest version lower than installed → fail (rollback protection: an attacker who can serve files
+   could otherwise serve an old, validly signed release). Higher → download the zip, check its
+   `sha256` against the manifest, extract to `versions\<version>`, keep the previous version dir,
+   delete older ones. Equal → skip the download.
+4. Run `versions\<version>\Setup.ps1` with the relay parameters. Only after it succeeds, write
+   `current` = the version, so a failed upgrade leaves the previous version active.
+
+**Scheduling:** `Install-PosTunnel` runs from the POS NinjaOne policy **daily**, off-hours. That
+installs new devices, rolls out releases, and repairs drift or tampering, all visible in NinjaOne's
+activity log and pausable fleet-wide by disabling one policy entry. `posctl update <DisplayName>`
+runs it on demand (a newly added device, or rolling a fix out before the next scheduled run). A
+self-updating task on the POS was rejected: invisible to NinjaOne and one more thing on the device to
+keep healthy.
+
+**`Setup`** (from the package, run by `Install-PosTunnel`). Every step checks before it changes:
 
 1. Install OpenSSH Server: `Add-WindowsCapability`; fall back to the Win32-OpenSSH MSI if that fails.
 2. `sshd_config`: `ListenAddress 127.0.0.1`, key auth only, default `Match Group administrators` file.
@@ -161,10 +198,13 @@ constants — this repo is public). Idempotent; re-running upgrades in place.
    logon, so the password is never needed.)
 4. Generate the relay key pair if absent; SYSTEM-only ACL on `C:\ProgramData\PosTunnel`.
 5. Pin the relay host key in `C:\ProgramData\PosTunnel\known_hosts`.
-6. Write `Watch.ps1` (embedded in `Setup`) to `C:\ProgramData\PosTunnel`. Register tasks, disabled:
-   `PosTunnel-Watch` (SYSTEM, every 2 min + at startup, runs `Watch.ps1`) and `PosTunnel-Link`.
+6. Register tasks, disabled: `PosTunnel-Watch` (SYSTEM, every 2 min + at startup, runs this
+   version's `Watch.ps1`) and `PosTunnel-Link`.
 7. Publish `posTunnelRelayKey`, `posTunnelHostKey`, `posTunnelVersion` custom fields
    (`Ninja-Property-Set`).
+
+State (`relay_key`, `known_hosts`, `session.json`, `lease`) lives in `C:\ProgramData\PosTunnel`
+itself, outside `versions\`, so it survives upgrades.
 
 ### 7.2 `posctl connect <DisplayName> [--idle-timeout <dur>]`
 
@@ -172,7 +212,7 @@ constants — this repo is public). Idempotent; re-running upgrades in place.
 2. Read its custom fields; error if setup hasn't run.
 3. Generate a session key pair into the local session state dir.
 4. `ssh ctl@relay tunnelctl open <port> <id> <idle-seconds> <relay pubkey>`.
-5. NinjaOne API: run `Open` as SYSTEM with `-Port -IdleSeconds -SessionKey`.
+5. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
 6. Poll `tunnelctl status <port>` until listening (timeout ~3 min; NinjaOne script dispatch is slow).
    On timeout: `tunnelctl close`, report.
 7. Write `~/.ssh/posctl/config` entry and `~/.ssh/posctl/known_hosts` line (section 8).
@@ -201,7 +241,7 @@ reboot during a session brings the tunnel back, and a reboot after expiry cleans
 
 1. `tunnelctl renew <port>`. On failure stop and report — the relay lease is the one that counts.
 2. Touch the POS lease over the tunnel: `ssh pos-x` setting `lease`'s `LastWriteTime`.
-3. If step 2 fails (tunnel down), run `Touch` via the NinjaOne API instead.
+3. If step 2 fails (tunnel down), run `Invoke-PosTunnel -Action Touch` via the NinjaOne API instead.
 4. Print the new idle deadline and the time left before the 72h maximum.
 
 ### 7.4 `posctl status [<DisplayName>]`
@@ -210,8 +250,9 @@ reboot during a session brings the tunnel back, and a reboot after expiry cleans
 
 ### 7.5 `posctl close <DisplayName>`
 
-`tunnelctl close <port>` → NinjaOne API run `Close` (backdates `lease`, starts `PosTunnel-Watch`, which
-tears down) → remove the local config and `known_hosts` entries and the session key.
+`tunnelctl close <port>` → NinjaOne API run `Invoke-PosTunnel -Action Close`
+(backdates `lease`, starts `PosTunnel-Watch`, which tears down) → remove the local config and
+`known_hosts` entries and the session key.
 
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
 
@@ -229,17 +270,15 @@ operator explicitly told it to rebuild this session, and should otherwise ask. T
 This urges an agent to reconsider without hard-denying it, and needs no per-workstation agent
 configuration.
 
-### 7.7 `posctl login` and `posctl scripts export <dir>`
+### 7.7 `posctl login` and `posctl update <DisplayName>`
 
 - `login`: prompts for the NinjaOne client ID and secret and stores them in the OS keyring.
-- `scripts export`: writes the NinjaOne library versions of the POS scripts (`Setup` with `Watch`
-  embedded) from the copies compiled into the binary, so the scripts in NinjaOne always match a
-  `posctl` release.
+- `update`: runs `Install-PosTunnel` on the device via the NinjaOne API (section 7.1).
 
 ## 8. Operator workstation
 
 - Config `posctl/config.toml` in the platform config dir: NinjaOne API base URL (region-specific) and
-  library script IDs for `Open`, `Close`, `Touch`; relay host, port and host key; operator key path.
+  library script IDs for `Install-PosTunnel` and `Invoke-PosTunnel`; relay host, port and host key; operator key path.
 - `~/.ssh/config` needs `Include posctl/config` above any `Host` block (once, by hand).
 - Generated entry:
 
@@ -287,9 +326,13 @@ Host pos-<slug>
 - **NinjaOne API only (no SSH):** no network exposure, but tens of seconds per command and awkward
   output retrieval. Kept as the fallback path for `Touch`/`Close` only.
 - **Rust binary on the POS:** adds allowlisting, signing and fleet update problems for no gain over
-  NinjaOne's own script library.
+  NinjaOne scripts plus a signed release.
 - **SSH certificate authority for session auth:** a long-lived CA private key that opens every POS;
   per-session keys avoid it.
+- **Package managers (WinGet via NinjaOne, PowerShell Gallery, Chocolatey) or NinjaOne "Install
+  Application" from a URL:** NinjaOne's WinGet integration documents only the public catalog; the
+  others add a registry account or package manager to trust, and none gives an integrity check
+  stronger than the pinned-signer release.
 
 ## 12. To verify during implementation
 
@@ -299,14 +342,19 @@ Host pos-<slug>
 - Exact `permitlisten` host matching against the `-R <port>:localhost:22` form the Windows client
   sends.
 - `Add-WindowsCapability` on the actual POS image.
+- `ssh-keygen -Y verify` on the oldest Windows build in the fleet (Windows 10's bundled OpenSSH
+  client is the oldest candidate).
+- NinjaOne: script variables in a policy's scheduled script, and how `Invoke-PosTunnel` receives the
+  API's parameter string.
 - `ss -ltnp` attributing the listener to the per-connection `sshd` child in the container.
 
 ## 13. Deployment order
 
-1. Relay: deploy the container with `OPERATOR_PUBKEY` set, record its host key (logged at startup), add the DNS record,
-   open 2222 in the Vultr firewall.
-2. NinjaOne: create the custom fields; `posctl scripts export`; add the scripts to the library; assign
-   `Setup` to the POS policy with the relay parameters.
-3. Operator: `posctl login`, write `config.toml`, add the `Include`, add the Claude Code permission
-   rule.
-4. Test end to end against one device before assigning `Setup` fleet-wide.
+1. Relay: deploy the container with `OPERATOR_PUBKEY` set, record its host key (logged at startup),
+   add the DNS record, open 2222 in the Vultr firewall.
+2. Release: generate the release signing key, pin its public half in `Install-PosTunnel`, publish
+   the first signed release.
+3. NinjaOne: create the custom fields; paste `Install-PosTunnel` and `Invoke-PosTunnel` into the
+   library; schedule `Install-PosTunnel` daily in the POS policy with the relay script variables.
+4. Operator: `posctl login`, write `config.toml`, add the `Include`.
+5. Test end to end against one device before scheduling `Install-PosTunnel` fleet-wide.

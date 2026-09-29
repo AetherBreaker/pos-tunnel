@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-One-time device setup: OpenSSH Server, the disabled support account, the relay key, Watch and its scheduled tasks, custom fields. Idempotent.
+Device setup: OpenSSH Server, the disabled support account, the relay key, Watch and its scheduled tasks, custom fields. Idempotent.
 .NOTES
-Design: docs/design.md, section 7.1. Runs as SYSTEM.
+Design: docs/design.md, section 7.1. Run by Install-PosTunnel, as SYSTEM.
 #>
 param(
     [Parameter(Mandatory)][string]$RelayHost,

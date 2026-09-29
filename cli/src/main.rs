@@ -1,6 +1,5 @@
 //! `posctl`: on-demand SSH sessions to NinjaOne-managed POS machines. Design: `docs/design.md`.
 
-use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -40,17 +39,8 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Work with the POS scripts compiled into this binary.
-    Scripts {
-        #[command(subcommand)]
-        command: ScriptsCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum ScriptsCommand {
-    /// Write the NinjaOne library versions of the POS scripts to a directory.
-    Export { dir: PathBuf },
+    /// Install or upgrade the POS package on a device now, instead of waiting for the daily run.
+    Update { name: String },
 }
 
 fn parse_idle_timeout(s: &str) -> Result<Duration> {
@@ -69,6 +59,6 @@ fn main() -> Result<()> {
         | Command::Status { .. }
         | Command::Close { .. }
         | Command::Rebuild { .. }
-        | Command::Scripts { .. } => bail!("not implemented yet"),
+        | Command::Update { .. } => bail!("not implemented yet"),
     }
 }

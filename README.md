@@ -1,4 +1,4 @@
-# pos-tunnel
+﻿# pos-tunnel
 
 On-demand SSH access to Windows POS machines managed by NinjaOne RMM. NinjaOne's API tells a POS to
 dial out to a hardened SSH relay; the operator (or a coding agent on the operator's workstation)
@@ -10,13 +10,14 @@ is scaffolding.
 
 - [`docs/design.md`](docs/design.md): the design (threat model, keys, timers, flows).
 - [`cli/`](cli/): `posctl`, the Rust CLI run on the operator workstation.
-- [`pos/`](pos/): PowerShell scripts for the NinjaOne script library, run on the POS as SYSTEM.
+- [`pos/`](pos/): PowerShell, run on the POS as SYSTEM. `ninja/` holds the two scripts pasted into
+  the NinjaOne library once; `package/` is the signed release asset they install and run.
 - [`relay/`](relay/): the relay container (Alpine `sshd`, `tunnelctl`, reaper), deployed with Docker
   Compose (Coolify: base directory `/relay`, set `OPERATOR_PUBKEY`).
 
 ## Usage (planned)
 
-```
+```powershell
 posctl login
 posctl connect "Store 42 Register 1"      # exact, case-sensitive NinjaOne display name
 ssh pos-store-42-register-1 "Get-Service"
