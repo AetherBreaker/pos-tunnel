@@ -1,3 +1,11 @@
 [workspace]
-members = ["cli"]
-resolver = "3"
+  resolver = "3"
+  members  = ["cli"]
+
+[workspace.package]
+  version = "0.1.0"
+  edition = "2024"
+  publish = false
+
+[profile.release]
+  strip = true

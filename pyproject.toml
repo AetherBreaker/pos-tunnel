@@ -1,0 +1,36 @@
+[project]
+  name            = "pos-tunnel"
+  version         = "0.1.0"
+  description     = "On-demand SSH access to NinjaOne-managed Windows POS machines through a hardened relay"
+  readme          = "README.md"
+  requires-python = ">=3.14"
+  # The wheel carries only the Rust `posctl` binary (maturin `bindings = "bin"`); no Python code.
+  dependencies    = []
+
+[dependency-groups]
+  dev = ["aeth-devkit"]
+
+[build-system]
+  requires      = ["maturin>=1.7,<2"]
+  build-backend = "maturin"
+
+[tool.maturin]
+  bindings      = "bin"
+  manifest-path = "cli/Cargo.toml"
+
+[tool.docker]
+  # relay/ is a hand-written image: its sshd must run as root, which devkit-container's
+  # drop-to-999 model excludes (docs/design.md, section 6.1).
+  silence_unlisted_services_warning = true
+
+[tool.poe]
+  include_script = [{ script = "aeth_devkit:tasks", executor = { type = "uv", frozen = true } }]
+
+[tool.uv.sources]
+  aeth-devkit = [{ index = "SFTPyPI" }]
+
+[[tool.uv.index]]
+  name        = "SFTPyPI"
+  url         = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple"
+  publish-url = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/"
+  explicit    = true
