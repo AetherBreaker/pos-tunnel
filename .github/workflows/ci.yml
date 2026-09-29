@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pos-package:
+    name: "POS package: manifest matches the files, signature valid"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v5
+      - run: uv run --no-project scripts/sign_pos.py --check
+
+  cli:
+    name: "posctl: clippy and tests"
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  relay:
+    name: "Relay: image builds, sshd_config valid"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: docker build -t relay relay
+      - run: >-
+          docker run --rm --entrypoint sh relay -c
+          "mkdir -p /data/hostkeys && ssh-keygen -q -t ed25519 -N '' -f /data/hostkeys/ssh_host_ed25519_key
+          && touch /etc/ssh/operator_keys && sshd -t"

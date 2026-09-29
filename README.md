@@ -15,6 +15,13 @@ is scaffolding.
 - [`relay/`](relay/): the relay container (Alpine `sshd`, `tunnelctl`, reaper), deployed with Docker
   Compose (Coolify: base directory `/relay`, set `OPERATOR_PUBKEY`).
 
+## Development
+
+A devkit project: `posctl` is packaged as a maturin binary wheel (`uv tool install pos-tunnel` from the
+private index), released with `poe release`. After changing anything in `pos/package/`, run
+`poe sign-pos` (needs `POS_TUNNEL_SIGNING_KEY`) and commit the re-signed `pos/manifest.json`; CI
+rejects an unsigned or stale manifest.
+
 ## Usage (planned)
 
 ```powershell

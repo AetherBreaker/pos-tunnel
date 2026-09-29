@@ -55,8 +55,15 @@
   bindings      = "bin"
   manifest-path = "cli/Cargo.toml"
 
+[tool.devkit]
+  # Attaches the signed POS package to each release (docs/design.md, section 7.1).
+  release-workflow-jobs = ["pos-package"]
+
 [tool.poe]
   include_script = [{ script = "aeth_devkit:tasks", executor = { type = "uv", frozen = true } }]
+
+  [tool.poe.tasks]
+    sign-pos = { cmd = "python scripts/sign_pos.py", help = "Re-sign pos/manifest.json after pos/package changes (needs POS_TUNNEL_SIGNING_KEY)" }
 
 [tool.pyright]
   typeCheckingMode = "standard"

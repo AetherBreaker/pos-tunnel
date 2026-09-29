@@ -19,7 +19,7 @@ operator workstation                    relay (VPS container)                 PO
 
 | Component | Where | What |
 |---|---|---|
-| `posctl` | operator workstation | Rust CLI. The only thing a person runs. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. |
+| `posctl` | operator workstation | Rust CLI, shipped as a maturin binary wheel on the private index (`uv tool install pos-tunnel`). The only thing a person runs. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. |
 | NinjaOne library scripts | NinjaOne → POS | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1. |
 | POS package | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset. |
 | relay | Docker container on the Coolify VPS | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management) and `reaper` (enforcement). |
@@ -156,10 +156,18 @@ session command, so nothing that runs inside the session could enforce a deadlin
 NinjaOne's API can't create or update library scripts, so the library holds only two scripts that
 never change; the real code ships as a signed GitHub release asset.
 
-**Release** (operator workstation, local release script): zip `pos/package/` →
-`pos-tunnel-pos.zip`; write `manifest.json` (`version`, `sha256` of the zip); sign it with
-`ssh-keygen -Y sign -n pos-tunnel-release` → `manifest.json.sig`; upload all three to the GitHub
-release.
+**Signing** (operator workstation): after changing `pos/package/`, `poe sign-pos`
+(`scripts/sign_pos.py`) rewrites `pos/manifest.json` (the POS package `version` and a `sha256` per
+file) and signs it with `ssh-keygen -Y sign -n pos-tunnel-release` → `pos/manifest.json.sig`; both are
+committed. The package version is independent of the wheel version and rises only when the files
+change, so CLI-only releases don't touch the fleet.
+
+**Release:** `devkit release` as usual. CI builds the `posctl` wheels; the `pos-package` job
+(kept through `setup-project` by `[tool.devkit].release-workflow-jobs`) re-verifies the committed
+manifest and signature against the files, then attaches `pos-package.zip`, `pos-manifest.json` and
+`pos-manifest.json.sig` to the release. CI never holds the signing key; it only packs what was signed.
+The `ci.yml` workflow runs the same verification on every push, so a forgotten re-sign fails there
+first.
 
 **`Invoke-PosTunnel -Action <Open|Close|Touch> …`** (library): runs
 `versions\<current>\<Action>.ps1` with the remaining arguments. `posctl` runs every per-session action
@@ -172,13 +180,14 @@ run with nothing to do changes nothing.
 
 1. If a session is open (`session.json` exists) and `-Force` isn't set: report "deferred", exit 0.
    Neither an upgrade nor setup repair should change `sshd` or the tasks under a live session.
-2. Download `manifest.json` and `.sig` from the latest release. Verify with `ssh-keygen -Y verify`
-   against the pinned signer (the OpenSSH client ships with Windows 10 and 11). Fail on a bad
-   signature.
+2. Download `pos-manifest.json` and its `.sig` from the latest release. Verify with
+   `ssh-keygen -Y verify` against the pinned signer (the OpenSSH client ships with Windows 10 and 11).
+   Fail on a bad signature.
 3. Manifest version lower than installed → fail (rollback protection: an attacker who can serve files
-   could otherwise serve an old, validly signed release). Higher → download the zip, check its
-   `sha256` against the manifest, extract to `versions\<version>`, keep the previous version dir,
-   delete older ones. Equal → skip the download.
+   could otherwise serve an old, validly signed release). Higher → download `pos-package.zip`,
+   extract to a staging dir, require its file set and every file's `sha256` to match the manifest
+   exactly, move it to `versions\<version>`, keep the previous version dir, delete older ones.
+   Equal → skip the download.
 4. Run `versions\<version>\Setup.ps1` with the relay parameters. Only after it succeeds, write
    `current` = the version, so a failed upgrade leaves the previous version active.
 
@@ -352,8 +361,8 @@ Host pos-<slug>
 
 1. Relay: deploy the container with `OPERATOR_PUBKEY` set, record its host key (logged at startup),
    add the DNS record, open 2222 in the Vultr firewall.
-2. Release: generate the release signing key, pin its public half in `Install-PosTunnel`, publish
-   the first signed release.
+2. Release: generate the release signing key; put its public half in `pos/allowed_signers` and
+   pinned in `Install-PosTunnel`; `poe sign-pos`; commit; `poe release`.
 3. NinjaOne: create the custom fields; paste `Install-PosTunnel` and `Invoke-PosTunnel` into the
    library; schedule `Install-PosTunnel` daily in the POS policy with the relay script variables.
 4. Operator: `posctl login`, write `config.toml`, add the `Include`.

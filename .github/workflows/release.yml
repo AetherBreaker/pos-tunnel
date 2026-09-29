@@ -138,3 +138,42 @@ jobs:
           UV_PUBLISH_USERNAME: ${{ secrets.UV_INDEX_SFTPYPI_USERNAME }}
           UV_PUBLISH_PASSWORD: ${{ secrets.UV_INDEX_SFTPYPI_PASSWORD }}
         run: uv publish --index SFTPyPI dist/*.whl dist/*.tar.gz
+
+  # Kept through setup-project by [tool.devkit].release-workflow-jobs. Attaches the POS package
+  # that Install-PosTunnel downloads (docs/design.md, section 7.1). The manifest and signature are
+  # committed, signed on the operator workstation; this job only verifies and packs them.
+  pos-package:
+    name: "Publish: attach the signed POS package to the release"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: The committed manifest must match the files and carry a valid signature
+        run: uv run --no-project scripts/sign_pos.py --check
+
+      - name: Pack
+        run: |
+          mkdir dist
+          (cd pos/package && zip -X -r ../../dist/pos-package.zip .)
+          cp pos/manifest.json dist/pos-manifest.json
+          cp pos/manifest.json.sig dist/pos-manifest.json.sig
+
+      - name: The release must still be the one that triggered this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          current="$(gh release view "$TAG" --json databaseId --jq .databaseId)"
+          [ "$current" = "$RELEASE_ID" ] || { echo "release $TAG is now #$current, not #$RELEASE_ID which triggered this run; not publishing" >&2; exit 1; }
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/* --clobber
