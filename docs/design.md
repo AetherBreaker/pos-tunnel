@@ -22,7 +22,7 @@ operator workstation                    relay (VPS container)                 PO
 | `posctl` | operator workstation | Rust CLI, shipped as a maturin binary wheel on the private index (`uv tool install pos-tunnel`). The only thing a person runs. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. |
 | NinjaOne library scripts | NinjaOne → POS | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1. |
 | POS package | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset. |
-| relay | Docker container on the Coolify VPS | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management) and `reaper` (enforcement). |
+| relay | Docker container on the Coolify VPS | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management), `reaper` (enforcement) and a log watcher (which connection logged in with which key). |
 
 ## 2. Threat model
 
@@ -77,8 +77,10 @@ session: `posctl` binds them to that device's port, and `tunnelctl` validates ke
 
 ### 6.1 Container
 
-- Alpine, `openssh-server`, `iproute2` (for `ss`), busybox `crond`. Entrypoint starts `crond`, then
-  `exec sshd -D -e`.
+- `openssh-server`, `iproute2` (for `ss`), a cron daemon, and Python for the log watcher. Entrypoint:
+  devkit-container's `run` in supervised mode, with the log watcher (section 6.5) as the supervised
+  app and `crond` and `sshd` (logging to syslog, not stderr) started before it. The container exits
+  when the watcher exits or stalls. How the relay fits devkit-container is open (section 11).
 - Published port 2222/tcp directly (not through Coolify's HTTP proxy — SSH is not TLS, so SNI routing
   can't apply). Vultr firewall group and host `ufw` (if enabled) must allow it.
 - Volume `/data`: `hostkeys/` (root, 0700) and `state/` (lease files, the POS key file, the log).
@@ -130,7 +132,7 @@ Runs as `ctl`. All state under `/data/state` (dir owned by `ctl:keyreader`, 0750
 
 | Command | Effect |
 |---|---|
-| `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists. Write lease file `leases/<port>` (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`) and the key line. `--rebuild` is logged distinctly. |
+| `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists, or if `tunnel_keys` already holds the same key (`sshd` uses the first matching line, so a second lease's POS would get the first one's port). Write lease file `leases/<port>` (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`, and the key's `fingerprint`, which the reaper matches against logins) and the key line. `--rebuild` is logged distinctly. |
 | `renew <port>` | `idle_deadline = min(now + idle_seconds, absolute_deadline)`; rewrite `expiry-time`. Error if no lease or already expired. |
 | `close <port>` | Set `idle_deadline = now`; the reaper removes it within a minute. |
 | `status [<port>]` | Deadlines, remaining time, and whether the port is listening. |
@@ -138,13 +140,48 @@ Runs as `ctl`. All state under `/data/state` (dir owned by `ctl:keyreader`, 0750
 `ctl` can't kill another user's processes, so `tunnelctl` never ends connections itself; it only marks
 leases. Enforcement is the reaper's job.
 
-### 6.5 Reaper
+### 6.5 Reaper and log watcher
 
-Root `crond` job, every minute:
-1. For each lease past `min(idle_deadline, absolute_deadline)`: kill the `sshd` process holding
-   `localhost:<port>` (found with `ss -ltnp`), delete the key line and the lease file, log it. `tunnelctl` and the reaper serialize on a
-   `flock` over the state dir.
-2. Kill any `tunnel` listener on a port that has no lease (e.g. left over after a crash).
+`sshd` logs through syslog, where each login line carries the process ID of that connection's
+privileged `sshd` process and the key's fingerprint:
+`sshd-session[17]: Accepted publickey for tunnel from <ip> port <n> ssh2: ED25519 SHA256:<fp>`.
+
+**Log watcher** (Python, using `aeth_ext`; the container's supervised app, section 6.1). Receives
+`sshd`'s syslog messages on `/dev/log` and sends every line to the central log server through
+`aeth_ext`, for activity monitoring. It writes no log files and sends nothing to Docker's log beyond
+what `aeth_ext` itself emits there (emergency logging, log-server probes): Docker's and Coolify's log
+handling cost performance this doesn't need. For each `tunnel` login it creates one file in `/run/pos-tunnel/connections/`,
+named `<pid>-<start time>` (start time from `/proc/<pid>/stat`, readable without privileges) and
+holding the fingerprint; written under a temporary name and renamed into place, so a reader never
+sees a partial file. It never deletes. It writes its heartbeat from its receive loop, not a thread,
+so a stalled loop stops the beats: `sshd` waits for each log line to be received, so a stalled
+watcher stalls new logins, and the supervisor stops a watcher whose heartbeat goes stale, taking the
+container with it.
+
+**Reaper** (root `crond` job, every minute; serializes with `tunnelctl` on a `flock` over the state
+dir, never with the watcher):
+
+1. Delete each connection file whose process is gone: no such pid, or a different start time (pids
+   get reused).
+2. For each lease past `min(idle_deadline, absolute_deadline)`: delete its key line and lease file,
+   log it. The key line goes first, so the POS can't log back in once step 3 ends its connections.
+3. For each connection file whose fingerprint belongs to no remaining lease: kill that process and
+   its children, delete the file, log it. This ends every connection of an expired, closed or
+   hand-deleted lease, spare ones included, and nothing else.
+4. Report each `tunnel` `sshd` process that has no connection file (its login was never recorded),
+   and leave it running.
+
+Why this shape:
+
+- The container can't see which process holds a port: `sshd`'s children refuse inspection and
+  Docker withholds `CAP_SYS_PTRACE`, so `ss -p` shows no process.
+- `sshd` checks a key only at login, so a POS that opened a spare connection during its lease could
+  re-bind its port after the holder was killed. Matching on the fingerprint ends all of them.
+- Killing every `tunnel` connection instead would interrupt other sessions.
+- One file per connection, created by rename and removed by unlink, needs no lock between the
+  watcher and the reaper, so neither can stall the other, and nothing grows with uptime.
+- `/run/pos-tunnel/` is emptied at every container start: a restart has already ended every
+  connection, and pids start over from 1, so old files would name unrelated processes.
 
 The reaper doesn't depend on the POS cooperating: a client connecting with `ssh -N` never runs a
 session command, so nothing that runs inside the session could enforce a deadline.
@@ -178,17 +215,25 @@ through it, so a session never downloads anything.
 public). Idempotent: every run converges the device to the latest release and a correct setup, and a
 run with nothing to do changes nothing.
 
-1. If a session is open (`session.json` exists) and `-Force` isn't set: report "deferred", exit 0.
+1. Secure `C:\ProgramData\PosTunnel` before reading or writing anything in it: owner SYSTEM,
+   SYSTEM-only ACL, inheritance off. If it exists in any other form (another owner or ACL, or a
+   junction), delete it first (a junction as a link, never followed) and install from scratch: a
+   session in progress is lost and `Setup` generates a new relay key. `C:\ProgramData` lets any user
+   create a folder and own it, and SYSTEM runs `Watch.ps1` from this one every 2 minutes, so a folder
+   a standard user created or wrote into first would be their path to SYSTEM.
+2. If a session is open (`session.json` exists) and `-Force` isn't set: report "deferred", exit 0.
    Neither an upgrade nor setup repair should change `sshd` or the tasks under a live session.
-2. Download `pos-manifest.json` and its `.sig` from the latest release. Verify with
-   `ssh-keygen -Y verify` against the pinned signer (the OpenSSH client ships with Windows 10 and 11).
-   Fail on a bad signature.
-3. Manifest version lower than installed → fail (rollback protection: an attacker who can serve files
-   could otherwise serve an old, validly signed release). Higher → download `pos-package.zip`,
-   extract to a staging dir, require its file set and every file's `sha256` to match the manifest
-   exactly, move it to `versions\<version>`, keep the previous version dir, delete older ones.
-   Equal → skip the download.
-4. Run `versions\<version>\Setup.ps1` with the relay parameters. Only after it succeeds, write
+3. Download `pos-manifest.json` and its `.sig` from the latest release into that folder (never
+   `%TEMP%`, which standard users can write to). Verify with `ssh-keygen -Y verify` against the pinned
+   signer (the OpenSSH client ships with Windows 10 and 11). Fail on a bad signature.
+4. Manifest version lower than installed → fail (rollback protection: an attacker who can serve files
+   could otherwise serve an old, validly signed release). Higher → download `pos-package.zip` into
+   that folder and read it in memory: write an entry to `staging\` only if its name is exactly a
+   manifest file and its `sha256` matches; any other entry or a missing file fails the install. No
+   archive content reaches disk before its hash matches, so a malicious archive can't place files
+   (e.g. through `..\` names). Move `staging\` to `versions\<version>`, keep the previous version dir,
+   delete older ones. Equal → skip the download.
+5. Run `versions\<version>\Setup.ps1` with the relay parameters. Only after it succeeds, write
    `current` = the version, so a failed upgrade leaves the previous version active.
 
 **Scheduling:** `Install-PosTunnel` runs from the POS NinjaOne policy **daily**, off-hours. That
@@ -205,7 +250,7 @@ keep healthy.
    Service start type Manual, stopped. Registry `DefaultShell` = Windows PowerShell.
 3. Create local admin `support` with a random discarded password, disabled. (Key auth uses an S4U
    logon, so the password is never needed.)
-4. Generate the relay key pair if absent; SYSTEM-only ACL on `C:\ProgramData\PosTunnel`.
+4. Generate the relay key pair if absent (`Install-PosTunnel` step 1 has already secured the folder).
 5. Pin the relay host key in `C:\ProgramData\PosTunnel\known_hosts`.
 6. Register tasks, disabled: `PosTunnel-Watch` (SYSTEM, every 2 min + at startup, runs this
    version's `Watch.ps1`) and `PosTunnel-Link`.
@@ -310,26 +355,19 @@ Host pos-<slug>
 - Windows OpenSSH has no `ControlMaster`, so each command is a full handshake through the jump
   (roughly 1–2 s).
 
-## 9. PCI DSS notes
-
-- Remote access exists only while a session is open, and is removed when it isn't (8.2.7): no standing
-  relay keys, `support` disabled, `sshd` stopped between sessions.
-- Session start/renew/close/rebuild are logged by NinjaOne (script runs) and by `tunnelctl`; `sshd`
-  logs every connection with its key fingerprint.
-- MFA for remote access into the cardholder data environment (8.4.3) is **not yet covered**. Candidate:
-  gate the operator key behind a hardware key (FIDO `ed25519-sk`). To be decided with the assessor.
-
-## 10. Limitations
+## 9. Limitations
 
 - S4U logon: the `support` session has no network credentials (no access to network shares).
 - One session per device at a time.
 - Up to ~2 minutes to recover a dropped tunnel (`Watch` interval).
+- If the relay's log watcher exits or stalls, the container stops and every tunnel drops until it
+  restarts.
 - `connect` takes as long as NinjaOne takes to dispatch a script (typically tens of seconds).
 
-## 11. Alternatives considered
+## 10. Alternatives considered
 
 - **Overlay network (Tailscale, ZeroTier, Cloudflare Tunnel):** another agent on every POS and a
-  third-party coordination service in PCI scope; Tailscale SSH has no Windows server anyway.
+  third-party coordination service in the access path; Tailscale SSH has no Windows server anyway.
 - **Joining the existing WireGuard hub:** would put untrusted POS machines on the same network as the
   office database PC.
 - **NinjaOne API only (no SSH):** no network exposure, but tens of seconds per command and awkward
@@ -343,7 +381,7 @@ Host pos-<slug>
   others add a registry account or package manager to trust, and none gives an integrity check
   stronger than the pinned-signer release.
 
-## 12. To verify during implementation
+## 11. To verify during implementation
 
 - NinjaOne API: device list and display-name field, online flag, custom-field read, script-run endpoint
   and its parameter format, `runAs` values, region base URLs, required OAuth scopes.
@@ -355,9 +393,17 @@ Host pos-<slug>
   client is the oldest candidate).
 - NinjaOne: script variables in a policy's scheduled script, and how `Invoke-PosTunnel` receives the
   API's parameter string.
-- `ss -ltnp` attributing the listener to the per-connection `sshd` child in the container.
+- devkit-container for the relay (section 6.1):
+  - Its supervisor only reports a stale app heartbeat (log line and `/fail` ping); it must also stop
+    the watcher and exit. Expected to be a small update.
+  - `sshd` and `crond` are long-running root daemons, but its startup scripts must exit, so they
+    would start in the background, and nothing would notice `sshd` dying.
+  - Its Dockerfile template is Debian-based; the relay image is Alpine.
+  - Startup order: startup scripts run before the app, so `sshd` accepts logins a few seconds
+    before the watcher listens. A POS logging in then goes unrecorded; the reaper reports it
+    (section 6.5, step 4) but can't end it at expiry.
 
-## 13. Deployment order
+## 12. Deployment order
 
 1. Relay: deploy the container with `OPERATOR_PUBKEY` set, record its host key (logged at startup),
    add the DNS record, open 2222 in the Vultr firewall.
