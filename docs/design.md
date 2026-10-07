@@ -27,7 +27,9 @@ operator workstation                    relay (VPS container)                 PO
 
 ## 2. Threat model
 
-- **POS machines are untrusted.** Firewall off, employees may have local admin. Assume an attacker on a
+- **POS machines are untrusted.** Firewall off; the till account is a passwordless local administrator
+  that logs in automatically (the POS software requires admin), so anyone at the till has admin.
+  Assume an attacker on a
   POS can read anything on it, including its relay private key, and can write its NinjaOne custom fields.
 - **Goal:** a compromised POS can affect only its own session. It must not be able to reach another
   POS's tunnel, bind another POS's port, read or change any lease or key on the relay, run code on the
@@ -45,7 +47,7 @@ All key pairs are ed25519.
 | Key pair | Generated | Private key | Public key reaches its holder via | Authorizes |
 |---|---|---|---|---|
 | POS relay key pair (per device) | by `Setup`, once per device; again on `posctl rekey` or a from-scratch reinstall (section 7.1, `Install-PosTunnel` step 1) | POS: `C:\ProgramData\PosTunnel\relay_key` | custom field `posTunnelRelayKey` → `posctl` → `tunnelctl open` | `tunnel@relay`, only while a session is open |
-| POS SSH server key pair (per device) | by Windows OpenSSH when `Setup` installs it; again on `posctl rekey` | POS: Windows OpenSSH's key files | custom field `posTunnelHostKey` → `posctl` → local `known_hosts` | operator verifies it is talking to that POS's `sshd` |
+| POS SSH server key pair (per device) | by `sshd` on its first start after `Setup` installs OpenSSH; again on `posctl rekey` | POS: `C:\ProgramData\ssh\ssh_host_ed25519_key` | custom field `posTunnelHostKey` → `posctl` → local `known_hosts` | operator verifies it is talking to that POS's `sshd` |
 | Session key pair | by `posctl`, on every `connect` and `rebuild` | operator workstation, session state dir | `Open` script parameter (public keys are safe in NinjaOne activity logs) | `support@POS` for this session only |
 | Operator key pair (per operator) | by `posctl-admin operator add` (the admin's own: by hand, section 12) | that operator's workstation, installed with `posctl operator import` | relay env var `OPERATOR_KEYS` → `/etc/ssh/operator_keys` (root-owned) at container start | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only); names the operator in `tunnelctl`'s log. Identity, not a security boundary. |
 | Relay SSH server key pair | by `posctl-admin relay keygen`; again only to rotate it or move the relay | relay env var `RELAY_SSH_PRIVATE_KEY`; a copy in `posctl-admin`'s config dir | `relay point` → fleet field → `Setup` → POS `known_hosts`; `posctl` config via `relay keygen --activate` (admin), `operator import` or `relay set` (others) | POS and operator verify the relay |
@@ -152,6 +154,11 @@ restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle dead
 - The public key string comes from a POS-writable custom field. `tunnelctl` accepts only
   `^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$` (comment dropped) and builds the line itself, so a malicious value
   can't inject options or extra lines.
+- Until the log watcher is listening on `/dev/log` (section 6.5), the command returns no keys, so a
+  POS logging in during container startup is refused and retries within 2 minutes instead of
+  holding a connection the reaper could never end. Meanwhile the pre-login `Banner` (`Match User
+  tunnel`; `sshd` re-reads the file per connection) says the relay is starting and to retry, for
+  anyone reading the POS's task log. Operators (`ctl`, `jump`) are unaffected.
 
 ### 6.4 `tunnelctl`
 
@@ -165,7 +172,7 @@ the name in the lease.
 | `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists, or if `tunnel_keys` already holds the same key (`sshd` uses the first matching line, so a second lease's POS would get the first one's port). Write lease file `leases/<port>` (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`, and the key's `fingerprint`, which the reaper matches against logins) and the key line. `--rebuild` is logged distinctly. |
 | `renew <port>` | `idle_deadline = min(now + idle_seconds, absolute_deadline)`; rewrite `expiry-time`. Error if no lease or already expired. |
 | `close <port>` | Set `idle_deadline = now`; the reaper removes it within a minute. |
-| `status [<port>]` | Deadlines, remaining time, and whether the port is listening. |
+| `status [<port>]` | Deadlines, remaining time, and whether the port is listening. While the log watcher isn't ready: "relay starting: POS logins paused until the log watcher is ready". |
 
 `ctl` can't kill another user's processes, so `tunnelctl` never ends connections itself; it only marks
 leases. Enforcement is the reaper's job.
@@ -258,7 +265,8 @@ setup, and a run with nothing to do changes nothing.
    `-Force` (used by `relay point`), run `Watch`'s teardown first.
 3. Download `pos-manifest.json` and its `.sig` from the latest release into that folder (never
    `%TEMP%`, which standard users can write to). Verify with `ssh-keygen -Y verify` against the
-   `posTunnelSigner` public key (the OpenSSH client ships with Windows 10 and 11). Fail on a bad
+   `posTunnelSigner` public key (the Win32-OpenSSH `ssh-keygen` once installed; on a fresh POS, the
+   one Windows bundles, section 11). Fail on a bad
    signature; the installed version stays active.
 4. Manifest version lower than installed → fail (rollback protection: an attacker who can serve files
    could otherwise serve an old, validly signed release). Higher → download `pos-package.zip` into
@@ -270,7 +278,9 @@ setup, and a run with nothing to do changes nothing.
 5. Run `versions\<version>\Setup.ps1` with the relay values. Only after it succeeds, write
    `current` = the version, so a failed upgrade leaves the previous version active.
 
-**Scheduling:** `Install-PosTunnel` runs from the POS NinjaOne policy **daily**, off-hours. That
+**Scheduling:** `Install-PosTunnel` runs from the POS NinjaOne policy **daily at 4 AM**, after the
+POSes' own 2 AM Windows Update and 3 AM restart, so it neither competes with an update nor is cut
+off by the restart. That
 installs new devices, rolls out releases, and repairs drift or tampering, all visible in NinjaOne's
 activity log and pausable fleet-wide by disabling one policy entry. `posctl update <DisplayName>`
 runs it on demand (a newly added device, or rolling a fix out before the next scheduled run). A
@@ -279,18 +289,33 @@ keep healthy.
 
 **`Setup`** (from the package, run by `Install-PosTunnel`). Every step checks before it changes:
 
-1. Install OpenSSH Server: `Add-WindowsCapability`; fall back to the Win32-OpenSSH MSI if that fails.
-2. `sshd_config`: `ListenAddress 127.0.0.1`, key auth only, default `Match Group administrators` file.
-   Service start type Manual, stopped. Registry `DefaultShell` = Windows PowerShell.
-3. Create local admin `support` with a random discarded password, disabled. (Key auth uses an S4U
+1. Write `C:\ProgramData\ssh\sshd_config`: `ListenAddress 127.0.0.1`, `AllowUsers support`, key auth
+   only, default `Match Group administrators` file. Always, and before OpenSSH is installed if it
+   isn't yet. `AllowUsers`: `administrators_authorized_keys` applies to every administrator, so
+   without it the session key would also log in as the till account or `BackupAdmin`. Key auth only:
+   `BackupAdmin` has the same known password on every POS.
+2. Install OpenSSH if `C:\Program Files\OpenSSH\sshd.exe` is missing: remove Windows' built-in
+   OpenSSH Server capability if present (it competes for the `sshd` service name), then install the
+   Win32-OpenSSH MSI. Only this first install happens here; NinjaOne's WinGet deployment
+   (`Microsoft.OpenSSH.Preview`) updates it afterwards, so security fixes arrive without a package
+   release. NinjaOne must not be the first to install it: the MSI installs `sshd` as Automatic and
+   starts it, and `sshd` writes the default config (all interfaces, password login) only when none
+   exists, so a POS without step 1's file would expose `sshd` to the store LAN. Every later MSI
+   upgrade recreates and starts the service the same way; the existing config is never overwritten
+   (`wmain_sshd.c` copies the default only if the file is missing), so that `sshd` accepts nothing
+   outside a session, and `Watch` stops it. Our scripts call `C:\Program Files\OpenSSH\` binaries by
+   full path, never the older copies in `System32`.
+3. Service start type Manual, stopped. Registry `DefaultShell` = Windows PowerShell.
+4. Create local admin `support` with a random discarded password, disabled. (Key auth uses an S4U
    logon, so the password is never needed.)
-4. Generate the relay key pair if absent (`Install-PosTunnel` step 1 has already secured the folder).
-5. Write the relay's host and port to `relay.json` and pin its public key in
+5. Generate the relay key pair if absent (`Install-PosTunnel` step 1 has already secured the folder).
+6. Write the relay's host and port to `relay.json` and pin its public key in
    `C:\ProgramData\PosTunnel\known_hosts`, replacing any previous values. `Open` builds the tunnel
    command from these.
-6. Register tasks, disabled: `PosTunnel-Watch` (SYSTEM, every 2 min + at startup, runs this
-   version's `Watch.ps1`) and `PosTunnel-Link`.
-7. Publish `posTunnelRelayKey`, `posTunnelHostKey`, `posTunnelVersion` custom fields
+7. Register tasks: `PosTunnel-Watch` (SYSTEM, every 2 min + at startup, runs this version's
+   `Watch.ps1`; always enabled, so it also undoes an MSI upgrade's restart of `sshd` between
+   sessions) and `PosTunnel-Link` (disabled).
+8. Publish `posTunnelRelayKey`, `posTunnelHostKey`, `posTunnelVersion` custom fields
    (`Ninja-Property-Set`).
 
 State (`relay_key`, `relay.json`, `known_hosts`, `session.json`, `lease`) lives in `C:\ProgramData\PosTunnel`
@@ -305,7 +330,9 @@ itself, outside `versions\`, so it survives upgrades.
 4. `ssh ctl@relay tunnelctl open <port> <id> <idle-seconds> <relay pubkey>`.
 5. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
 6. Poll `tunnelctl status <port>` until listening (timeout ~3 min; NinjaOne script dispatch is slow).
-   On timeout: `tunnelctl close`, report.
+   On timeout: `tunnelctl close`, report. If `tunnelctl` reports the relay starting, `connect` and
+   `status` say so and that the POS retries within 2 minutes, and a timeout says to retry `connect`
+   rather than failing bare.
 7. Write `~/.ssh/posctl/config` entry and `~/.ssh/posctl/known_hosts` line (section 8).
 8. Print the alias.
 
@@ -316,13 +343,15 @@ Windows firewall is off, so this is the only thing keeping `sshd` off the store 
 `session.json` (`port`, `idle_seconds`, `started`) and touch `lease` → set `PosTunnel-Link`'s action to
 `ssh -N -R <port>:localhost:22 tunnel@<relay> -p <relay port> -i relay_key -o ExitOnForwardFailure=yes
 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o UserKnownHostsFile=known_hosts`
-→ enable and start `PosTunnel-Watch`.
+→ enable and start `PosTunnel-Link` and run `PosTunnel-Watch`.
 
 **`Watch`** (POS, SYSTEM, every 2 min and at startup):
-1. No `session.json` → disable own tasks, exit.
+1. No `session.json` → ensure the idle state and exit: `sshd` Manual and stopped (an OpenSSH MSI
+   upgrade sets it Automatic and starts it), `administrators_authorized_keys` empty, `support`
+   disabled, `PosTunnel-Link` stopped and disabled.
 2. Lease mtime older than `idle_seconds`, or `started` older than 72h → **teardown**: stop
    `PosTunnel-Link`, stop `sshd`, empty `administrators_authorized_keys`, disable `support`, delete
-   `session.json` and `lease`, disable both tasks.
+   `session.json` and `lease`, disable `PosTunnel-Link`.
 3. `PosTunnel-Link` not running → start it.
 
 `Watch` is the only teardown implementation; everything else triggers it. The startup trigger means a
@@ -456,6 +485,8 @@ Host pos-<slug>
 - S4U logon: the `support` session has no network credentials (no access to network shares).
 - One session per device at a time.
 - Up to ~2 minutes to recover a dropped tunnel (`Watch` interval).
+- The POSes restart nightly at 3 AM: an open session survives (`Watch` restores the tunnel at
+  startup), but its tunnel is down for a few minutes.
 - If the relay's log watcher exits or stalls, the container stops and every tunnel drops until it
   restarts.
 - `connect` takes as long as NinjaOne takes to dispatch a script (typically tens of seconds).
@@ -496,19 +527,20 @@ under its `ForceCommand` (both against the relay image). Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
   ones (its documentation shows positional only).
-- `Add-WindowsCapability` on the actual POS image.
-- `ssh-keygen -Y verify` on the oldest Windows build in the fleet (Windows 10's bundled OpenSSH
-  client is the oldest candidate).
-- `ssh-keygen -A` regenerating Windows OpenSSH's server key pair in `C:\ProgramData\ssh` (`rekey`).
+- `ssh-keygen -Y verify` with the `ssh-keygen` Windows bundles, on the oldest Windows build in the
+  fleet: `Install-PosTunnel` uses it on a fresh POS, before `Setup` has installed Win32-OpenSSH.
+  OpenSSH before 8.1 lacks `-Y`.
+- NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
+- Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
+- `ssh-keygen -A` regenerating the Win32-OpenSSH server key pair in `C:\ProgramData\ssh` (`rekey`).
 - devkit-container for the relay (section 6.1):
   - Its supervisor only reports a stale app heartbeat (log line and `/fail` ping); it must also stop
     the watcher and exit. Expected to be a small update.
   - `sshd` and `crond` are long-running root daemons, but its startup scripts must exit, so they
     would start in the background, and nothing would notice `sshd` dying.
   - Its Dockerfile template is Debian-based; the relay image is Alpine.
-  - Startup order: startup scripts run before the app, so `sshd` accepts logins a few seconds
-    before the watcher listens. A POS logging in then goes unrecorded; the reaper reports it
-    (section 6.5, step 4) but can't end it at expiry.
+  - Startup order: startup scripts run before the app, so `sshd` starts before the watcher
+    listens; POS logins are held off until it does (section 6.3).
 
 ## 12. Deployment order
 
