@@ -17,13 +17,13 @@ operator workstation                    relay (VPS container)                 PO
 
 ## 1. Components
 
-| Component | Where | What |
-|---|---|---|
-| `posctl` | operator workstation | Rust CLI, shipped as a maturin binary wheel on the private index (`uv tool install pos-tunnel`). Session commands for every operator. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config. |
-| `posctl-admin` | admin's workstation | Second binary in the same wheel: key generation and fleet configuration (section 7.9). Kept apart so its commands never show in `posctl --help`. |
-| NinjaOne library scripts | NinjaOne → POS | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1. |
-| POS package | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset. |
-| relay | Docker container on the Coolify VPS | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management), `reaper` (enforcement) and a log watcher (which connection logged in with which key). |
+| Component                | Where                                        | What                                                                                                                                                                                                                                                                                |
+| ------------------------ | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `posctl`                 | operator workstation                         | Rust CLI, shipped as a maturin binary wheel on the private index (`uv tool install pos-tunnel`). Session commands for every operator. Calls the NinjaOne API, drives the relay via `tunnelctl`, writes local SSH config.                                                            |
+| `posctl-admin`           | admin's workstation                          | Second binary in the same wheel: key generation and fleet configuration (section 7.9). Kept apart so its commands never show in `posctl --help`.                                                                                                                                    |
+| NinjaOne library scripts | NinjaOne → POS                               | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1.                                                   |
+| POS package              | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset.                                                                                                                                       |
+| relay                    | Docker container on the Coolify VPS          | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management), `reaper` (enforcement) and a log watcher (which connection logged in with which key). |
 
 ## 2. Threat model
 
@@ -44,15 +44,15 @@ operator workstation                    relay (VPS container)                 PO
 
 All key pairs are ed25519.
 
-| Key pair | Generated | Private key | Public key reaches its holder via | Authorizes |
-|---|---|---|---|---|
-| POS relay key pair (per device) | by `Setup`, once per device; again on `posctl rekey` or a from-scratch reinstall (section 7.1, `Install-PosTunnel` step 1) | POS: `C:\ProgramData\PosTunnel\relay_key` | custom field `posTunnelRelayKey` → `posctl` → `tunnelctl open` | `tunnel@relay`, only while a session is open |
-| POS SSH server key pair (per device) | by `sshd` on its first start after `Setup` installs OpenSSH; again on `posctl rekey` | POS: `C:\ProgramData\ssh\ssh_host_ed25519_key` | custom field `posTunnelHostKey` → `posctl` → local `known_hosts` | operator verifies it is talking to that POS's `sshd` |
-| Session key pair | by `posctl`, on every `connect` and `rebuild` | operator workstation, session state dir | `Open` script parameter (public keys are safe in NinjaOne activity logs) | `support@POS` for this session only |
-| Operator key pair (per operator) | by `posctl-admin operator add` (the admin's own: by hand, section 12) | that operator's workstation, installed with `posctl operator import` | relay env var `OPERATOR_KEYS` → `/etc/ssh/operator_keys` (root-owned) at container start | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only); names the operator in `tunnelctl`'s log. Identity, not a security boundary. |
-| Relay SSH server key pair | by `posctl-admin relay keygen`; again only to rotate it or move the relay | relay env var `RELAY_SSH_PRIVATE_KEY`; a copy in `posctl-admin`'s config dir | `relay point` → fleet field → `Setup` → POS `known_hosts`; `posctl` config via `relay keygen --activate` (admin), `operator import` or `relay set` (others) | POS and operator verify the relay |
-| Release signing key pair | by `posctl-admin signing keygen`; again only if lost or leaked | admin workstation only — never CI, so a compromised GitHub account can't sign | `signing keygen` → fleet field → `Install-PosTunnel`; and `pos/allowed_signers`, for CI's check | POS package releases (namespace `pos-tunnel-release`) |
-| NinjaOne API client credentials (not a key pair) | in NinjaOne's console | OS keyring (`posctl login`) | — | running SYSTEM scripts on every POS; the admin's also writes the fleet fields |
+| Key pair                                         | Generated                                                                                                                  | Private key                                                                   | Public key reaches its holder via                                                                                                                           | Authorizes                                                                                                                                       |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| POS relay key pair (per device)                  | by `Setup`, once per device; again on `posctl rekey` or a from-scratch reinstall (section 7.1, `Install-PosTunnel` step 1) | POS: `C:\ProgramData\PosTunnel\relay_key`                                     | custom field `posTunnelRelayKey` → `posctl` → `tunnelctl open`                                                                                              | `tunnel@relay`, only while a session is open                                                                                                     |
+| POS SSH server key pair (per device)             | by `sshd` on its first start after `Setup` installs OpenSSH; again on `posctl rekey`                                       | POS: `C:\ProgramData\ssh\ssh_host_ed25519_key`                                | custom field `posTunnelHostKey` → `posctl` → local `known_hosts`                                                                                            | operator verifies it is talking to that POS's `sshd`                                                                                             |
+| Session key pair                                 | by `posctl`, on every `connect` and `rebuild`                                                                              | operator workstation, session state dir                                       | `Open` script parameter (public keys are safe in NinjaOne activity logs)                                                                                    | `support@POS` for this session only                                                                                                              |
+| Operator key pair (per operator)                 | by `posctl-admin operator add` (the admin's own: by hand, section 12)                                                      | that operator's workstation, installed with `posctl operator import`          | relay env var `OPERATOR_KEYS` → `/etc/ssh/operator_keys` (root-owned) at container start                                                                    | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only); names the operator in `tunnelctl`'s log. Identity, not a security boundary. |
+| Relay SSH server key pair                        | by `posctl-admin relay keygen`; again only to rotate it or move the relay                                                  | relay env var `RELAY_SSH_PRIVATE_KEY`; a copy in `posctl-admin`'s config dir  | `relay point` → fleet field → `Setup` → POS `known_hosts`; `posctl` config via `relay keygen --activate` (admin), `operator import` or `relay set` (others) | POS and operator verify the relay                                                                                                                |
+| Release signing key pair                         | by `posctl-admin signing keygen`; again only if lost or leaked                                                             | admin workstation only — never CI, so a compromised GitHub account can't sign | `signing keygen` → fleet field → `Install-PosTunnel`; and `pos/allowed_signers`, for CI's check                                                             | POS package releases (namespace `pos-tunnel-release`)                                                                                            |
+| NinjaOne API client credentials (not a key pair) | in NinjaOne's console                                                                                                      | OS keyring (`posctl login`)                                                   | —                                                                                                                                                           | running SYSTEM scripts on every POS; the admin's also writes the fleet fields                                                                    |
 
 All fields are NinjaOne global custom fields (text).
 
@@ -86,10 +86,10 @@ definition, since a changed setting may be tampering.
 
 ## 5. Timers
 
-| Timer | Value | Authoritative on | Mirror |
-|---|---|---|---|
-| Idle timeout | 12h default; `--idle-timeout` may only shorten it | relay lease (`tunnelctl`, reaper) | POS lease file mtime (`Watch`) |
-| Absolute maximum | 72h from `connect` | relay lease | POS session start time (`Watch`) |
+| Timer            | Value                                             | Authoritative on                  | Mirror                           |
+| ---------------- | ------------------------------------------------- | --------------------------------- | -------------------------------- |
+| Idle timeout     | 12h default; `--idle-timeout` may only shorten it | relay lease (`tunnelctl`, reaper) | POS lease file mtime (`Watch`)   |
+| Absolute maximum | 72h from `connect`                                | relay lease                       | POS session start time (`Watch`) |
 
 - Each side computes its deadlines from **its own clock**. `posctl` never sends a timestamp, so clock
   skew between the three machines doesn't matter.
@@ -124,11 +124,11 @@ definition, since a changed setting may be tampering.
 
 ### 6.2 Users and `sshd_config`
 
-| User | Who | Allowed |
-|---|---|---|
-| `tunnel` | every POS | remote forwarding of its own port only. No shell, no command, no local forwarding. |
-| `jump` | operator | local forwarding (`ProxyJump`) to `localhost` only. No shell. |
-| `ctl` | operator | `tunnelctl` only (forced command; arguments via `SSH_ORIGINAL_COMMAND`; `ExposeAuthInfo` tells it which operator key logged in). No forwarding. |
+| User     | Who       | Allowed                                                                                                                                         |
+| -------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tunnel` | every POS | remote forwarding of its own port only. No shell, no command, no local forwarding.                                                              |
+| `jump`   | operator  | local forwarding (`ProxyJump`) to `localhost` only. No shell.                                                                                   |
+| `ctl`    | operator  | `tunnelctl` only (forced command; arguments via `SSH_ORIGINAL_COMMAND`; `ExposeAuthInfo` tells it which operator key logged in). No forwarding. |
 
 Global: key auth only, no root login, `AllowUsers tunnel jump ctl`, `GatewayPorts no`, no agent/X11/
 stream-local forwarding, `PermitTunnel no`, `ClientAliveInterval 30`/`ClientAliveCountMax 3`,
@@ -167,12 +167,12 @@ Runs as `ctl`. All state under `/data/state` (dir owned by `ctl:keyreader`, 0750
 operator's name (its key's entry in `OPERATOR_KEYS`), the command and arguments; `open` also records
 the name in the lease.
 
-| Command | Effect |
-|---|---|
+| Command                                                       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists, or if `tunnel_keys` already holds the same key (`sshd` uses the first matching line, so a second lease's POS would get the first one's port). Write lease file `leases/<port>` (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`, and the key's `fingerprint`, which the reaper matches against logins) and the key line. `--rebuild` is logged distinctly. |
-| `renew <port>` | `idle_deadline = min(now + idle_seconds, absolute_deadline)`; rewrite `expiry-time`. Error if no lease or already expired. |
-| `close <port>` | Set `idle_deadline = now`; the reaper removes it within a minute. |
-| `status [<port>]` | Deadlines, remaining time, and whether the port is listening. While the log watcher isn't ready: "relay starting: POS logins paused until the log watcher is ready". |
+| `renew <port>`                                                | `idle_deadline = min(now + idle_seconds, absolute_deadline)`; rewrite `expiry-time`. Error if no lease or already expired.                                                                                                                                                                                                                                                                                                                                                                      |
+| `close <port>`                                                | Set `idle_deadline = now`; the reaper removes it within a minute.                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `status [<port>]`                                             | Deadlines, remaining time, and whether the port is listening. While the log watcher isn't ready: "relay starting: POS logins paused until the log watcher is ready".                                                                                                                                                                                                                                                                                                                            |
 
 `ctl` can't kill another user's processes, so `tunnelctl` never ends connections itself; it only marks
 leases. Enforcement is the reaper's job.
