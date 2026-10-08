@@ -107,19 +107,18 @@ definition, since a changed setting may be tampering.
   Dockerfile and compose file. The image is devkit-container's template (Debian bookworm,
   `uv:python3.14-bookworm-slim`); its `final` window adds `openssh-server` and `cron`.
 - Entrypoint: devkit-container's `run`, supervised. As root, the startup script `relay-startup`
-  runs first, then the supervisor drops to uid 999 and starts the daemon (`run-app-pos-tunnel-relay`,
-  section 6.5). The container exits when the daemon exits.
+  runs first; then the supervisor starts `sshd -D -E /run/pos-tunnel/sshd.log` and `cron -f` as root
+  (`[tool.docker].daemons`, devkit-container 2.2), and the daemon (`run-app-pos-tunnel-relay`,
+  section 6.5) as uid 999. The container exits when the daemon, `sshd` or `cron` exits.
 - `relay-startup`:
   1. Refuse to start unless `RELAY_SSH_PRIVATE_KEY` and `OPERATOR_KEYS` are set; never generate a
      key pair.
   2. Write the relay private key to a root-only file under `/run/relay/`, and the operator keys to
      `/etc/ssh/operator_keys` (root-owned, 0644, one `ssh-ed25519 <base64> <name>` line each).
   3. Recreate `/run/pos-tunnel/` empty, owned by 999 (a restart keeps the container's filesystem,
-     and pids start over, so old state would name unrelated processes); write the `tunnel` banner
-     there saying the relay is starting; link `/dev/log` to `/run/pos-tunnel/log.sock` (Docker
-     recreates `/dev` at each start, and 999 can't).
-  4. Start `sshd` (daemonized, logging to syslog) and `cron`, and record each one's pid and start
-     time in `/run/pos-tunnel/daemons.json`.
+     and pids start over, so old state would name unrelated processes), and create the FIFO
+     `/run/pos-tunnel/sshd.log` in it (owner 999, 0600; root writes it regardless).
+  4. Write `sshd_config` and the killer's `/etc/cron.d` entry.
 
   Both key variables are in `scrub_env`, so the daemon never sees them.
 - Compose: published port 2222/tcp directly (not through Coolify's HTTP proxy — SSH is not TLS, so
@@ -158,9 +157,10 @@ NAT share an address, so the startup gate (section 6.3) would lock out every POS
 
 ### 6.3 POS keys
 
-`tunnel`'s keys come from `AuthorizedKeysCommand`: `tunnel-keys`, run as `keyreader`, asks the
-daemon (section 6.5) for the current lines and prints them. `tunnel` has no way to run anything. One
-line per open lease:
+`tunnel`'s keys come from `AuthorizedKeysCommand /app/.venv/bin/tunnel-keys %u %f`, run as
+`keyreader`: it asks the daemon (section 6.5) for the current lines and prints them, and in the same
+request reports the connection it serves (its parent pid, the connection's `[priv]` process, and `%f`,
+the offered key's fingerprint). `tunnel` has no way to run anything. One line per open lease:
 
 ```
 restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle deadline, UTC>" ssh-ed25519 <base64>
@@ -174,12 +174,11 @@ restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle dead
 - The public key string comes from a POS-writable custom field. The daemon accepts only
   `^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$` (comment dropped) and builds the line itself, so a malicious
   value can't inject options or extra lines.
-- **Startup gate:** if the daemon isn't answering (not yet started, or stalled), `tunnel-keys`
-  prints nothing after a 5 s timeout, so a POS is refused and retries within 2 minutes rather than
-  holding a connection the daemon never saw. Meanwhile the pre-login `Banner` (`Match User tunnel`;
-  `sshd` re-reads the file per connection) says the relay is starting and to retry, for anyone
-  reading the POS's task log; the daemon clears it once it listens. Operators (`ctl`, `jump`) are
-  unaffected.
+- **Startup and stall gates:** `sshd` logs to the daemon's FIFO (section 6.5), so until the daemon
+  opens it `sshd` doesn't even listen, and while the daemon stalls every new connection blocks on
+  its first log line, operators' included. If `sshd` gets through but the daemon doesn't answer,
+  `tunnel-keys` prints nothing after a 5 s timeout, so the POS is refused. Either way a POS retries
+  within 2 minutes, and no POS holds a connection the daemon didn't record.
 
 ### 6.4 `tunnelctl`
 
@@ -204,56 +203,67 @@ command and its arguments, and records the name in the lease on `open`.
 **Daemon** (`run-app-pos-tunnel-relay`, Python, uid 999; the supervised app). One process owns all
 relay state and logging, so nothing needs a lock:
 
-- **Log intake.** Receives `sshd`'s syslog on `/run/pos-tunnel/log.sock` (via `/dev/log`). Each
-  `tunnel` login line carries the pid of that connection's privileged `sshd` process and the key's
-  fingerprint: `sshd[17]: Accepted publickey for tunnel from <ip> port <n> ssh2: ED25519
-  SHA256:<fp>`. The daemon records each login in memory as pid, start time (from `/proc/<pid>/stat`,
-  readable without privileges; pids get reused) and fingerprint.
+- **Connections.** Each `tunnel-keys` request carries the connection's `[priv]` pid and the offered
+  key's fingerprint. The daemon records the fingerprint against that pid and its start time (from
+  `/proc/<pid>/stat`, readable without privileges; pids get reused) **only if the fingerprint
+  belongs to a live lease** then: a key without one can't log in. `sshd` calls the command once per
+  offered key and again to verify the accepted one, so a connection can hold several fingerprints.
+- **Log intake.** Reads `sshd`'s log from the FIFO `/run/pos-tunnel/sshd.log` (`sshd -E`) and sends
+  every line to the central log server; nothing else feeds enforcement. Nothing owns `/dev/log`, so
+  every other program's syslog writes (`cron`, PAM) are dropped at once and never wait on the daemon.
 - **Requests.** Serves `tunnelctl` and `tunnel-keys` on `/run/pos-tunnel/ctl.sock`, one JSON line
   each way. The caller's uid (`SO_PEERCRED`) decides what it may ask: `ctl` the section 6.4
-  commands, `keyreader` the key lines only, anyone else nothing.
+  commands, `keyreader` the key lines (and the connection report), anyone else nothing.
 - **Leases.** One JSON file per lease in `state/leases/`, written to a temporary name and renamed;
   loaded at start, so a restart keeps every lease.
 - **Enforcement,** every 5 s: forget connections whose process is gone (no such pid, or a different
   start time); drop each lease past `min(idle_deadline, absolute_deadline)`, which removes its key
-  line at once; then request a kill for every connection whose fingerprint belongs to no remaining
-  lease. That ends every connection of an expired, closed or hand-deleted lease, spare ones
-  included, and nothing else. A `tunnel` `sshd` process it never saw log in is reported and left
-  running.
-- **Logging.** Every `sshd` line and every audit record goes to the central log server through
-  `aeth_ext` (socket mode, configured by TOML like any `aeth_ext` app). `aeth_ext` sends
-  synchronously on the logging thread, so the main loop only hands lines to a bounded in-memory
-  queue (10,000) drained by a sender thread; on overflow it drops and counts, and reports the count
-  once delivery resumes. `aeth_ext` keeps its own 7-day delivery history in `persisted_data`.
+  line at once; then request a kill for every connection holding **any** fingerprint that no longer
+  belongs to a remaining lease. That ends every connection of an expired, closed or hand-deleted
+  lease, spare ones included. A POS that offered another POS's public key before its own only gets
+  its own connection killed earlier, which the threat model accepts; records are per pid, so no POS
+  can get another's connection killed. A `tunnel` `[priv]` process it holds no record for is
+  reported and left running.
+- **Logging.** `sshd`'s lines and the daemon's audit records go through `aeth_ext` (socket mode,
+  configured by TOML like any `aeth_ext` app). `aeth_ext` sends synchronously on the logging thread,
+  so the main loop only hands lines to a bounded in-memory queue (10,000) drained by a sender thread;
+  on overflow it drops and counts, and reports the count once delivery resumes. `aeth_ext` keeps its
+  own 7-day delivery history in `persisted_data`.
 - **Liveness.** One single-threaded loop (`selectors`, waking at least every 5 s) does intake,
   requests, enforcement and the heartbeat devkit-container reads, so a stalled loop stops the beats
-  and the supervisor's `/fail` ping alerts. It exits non-zero, ending the container, if `sshd` or
-  `cron` is no longer the process `daemons.json` names, or the killer's beat is older than 3 minutes.
+  and the supervisor's `/fail` ping alerts. It exits non-zero, ending the container, if the killer's
+  beat is older than 3 minutes (a `cron` that runs but no longer runs the job). devkit-container
+  ends the run itself if `sshd` or `cron` exits.
 
 **Killer** (`relay-killer`, root `cron` job, every minute). Only root can signal `sshd`'s connection
 processes, so this is the one privileged step, and it decides nothing:
 
 1. For each request in `/run/pos-tunnel/kill/` (`<pid>-<start time>`): if that pid still has that
-   start time and its command line is an `sshd` process of user `tunnel`, kill it. Delete the
-   request either way.
+   start time and is a `tunnel` `[priv]` process, kill it and its children. Delete the request
+   either way.
 2. Fail closed: if the daemon's heartbeat is older than 3 minutes, kill every `tunnel` `sshd`
    process. A stalled daemon can no longer enforce deadlines, so no tunnel outlives it.
 3. Write its own beat to `/run/pos-tunnel/killer.beat`.
 
-It logs nothing; the daemon sees each disconnect in `sshd`'s log and records it.
+It logs nothing; the daemon sees each disconnect in `sshd`'s log. Neither it nor `cron` touches
+anything the daemon owns, so a stalled daemon can't stop it.
 
 Why this shape:
 
 - The container can't see which process holds a port: `sshd`'s children refuse inspection and
-  Docker withholds `CAP_SYS_PTRACE`, so `ss -p` shows no process. The login line is the only link
-  from a key to a process.
+  Docker withholds `CAP_SYS_PTRACE`, so `ss -p` shows no process. `AuthorizedKeysCommand` runs inside
+  the login, as a child of the connection's `[priv]` process, so it links key and process
+  synchronously, before the POS is in.
 - `sshd` checks a key only at login, so a POS that opened a spare connection during its lease could
   re-bind its port after the holder was killed. Matching on the fingerprint ends all of them, and
   killing every `tunnel` connection instead would interrupt other sessions.
 - One owner for leases, connections and logging: short-lived processes can't each hold an
   `aeth_ext` connection, and a single owner needs no locks.
-- Failure modes stay safe: a stalled daemon freezes the relay (no logins, no `tunnelctl`) and the
-  killer drops every tunnel; a dead `sshd`, `cron` or killer restarts the container.
+- The FIFO, not syslog: only `sshd` writes it, so a stalled daemon blocks `sshd` (no new logins: the
+  relay freezes in its safe state) and nothing else; owning `/dev/log` made `cron` block too, and
+  with it the killer.
+- Failure modes stay safe: a stalled daemon freezes the relay and the killer drops every tunnel; a
+  dead `sshd`, `cron` or daemon ends the container, and `restart: always` brings it back.
 
 Enforcement doesn't depend on the POS cooperating: a client connecting with `ssh -N` never runs a
 session command, so nothing that runs inside the session could enforce a deadline.
@@ -377,7 +387,8 @@ itself, outside `versions\`, so it survives upgrades.
 Windows firewall is off, so this is the only thing keeping `sshd` off the store LAN) → write
 `session.json` (`port`, `idle_seconds`, `started`) and touch `lease` → set `PosTunnel-Link`'s action to
 `ssh -N -R <port>:localhost:22 tunnel@<relay> -p <relay port> -i relay_key -o ExitOnForwardFailure=yes
--o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o UserKnownHostsFile=known_hosts`
+-o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o UserKnownHostsFile=known_hosts
+-o IdentitiesOnly=yes` (only `relay_key` is offered: the relay records every key a POS offers, section 6.5)
 → enable and start `PosTunnel-Link` and run `PosTunnel-Watch`.
 
 **`Watch`** (POS, SYSTEM, every 2 min and at startup):
@@ -567,7 +578,11 @@ client); on 9.2, the login line `sshd[<pid>]: Accepted publickey for tunnel from
 ED25519 SHA256:<fp>` naming the connection's root `sshd: tunnel [priv]` process (its child
 `sshd: tunnel` runs as `tunnel`), whose start time and command line uid 999 can read but not signal;
 the disconnect line naming the child's pid instead, so the daemon detects ends through `/proc`; and
-`sshd` blocking a new login while `/dev/log` isn't being read. Still open:
+`sshd` blocking a new login while `/dev/log` isn't being read; `AuthorizedKeysCommand`'s parent being the
+connection's `[priv]` process, called once per offered key plus once to verify the accepted one; `sshd -E`
+to a FIFO: `sshd` waits to open it until a reader does, per-connection processes write it too, a full pipe
+holds new logins, and a vanished reader ends the connection that tried to log (`Broken pipe`); Debian's
+`cron` blocking every job (even with `-L 0`) while `/dev/log` isn't read. Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
   ones (its documentation shows positional only).
