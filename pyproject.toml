@@ -66,6 +66,8 @@
     sign-pos = { cmd = "python scripts/sign_pos.py", help = "Re-sign pos/manifest.json after pos/package changes (needs POS_TUNNEL_SIGNING_KEY)" }
 
 [tool.pyright]
+  # The relay submodule is its own project, type-checked with its own venv and Linux platform.
+  exclude          = ["relay"]
   typeCheckingMode = "standard"
 
   verboseOutput          = true
