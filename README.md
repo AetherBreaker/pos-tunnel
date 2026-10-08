@@ -12,8 +12,8 @@ is scaffolding.
 - [`cli/`](cli/): `posctl`, the Rust CLI run on the operator workstation.
 - [`pos/`](pos/): PowerShell, run on the POS as SYSTEM. `ninja/` holds the two scripts pasted into
   the NinjaOne library once; `package/` is the signed release asset they install and run.
-- [`relay/`](relay/): the relay container (Alpine `sshd`, `tunnelctl`, reaper), deployed with Docker
-  Compose (Coolify: base directory `/relay`, set `OPERATOR_PUBKEY`).
+- [`relay/`](relay/): the relay container, a submodule (`AetherBreaker/pos-tunnel-relay`): `sshd`
+  plus a Python daemon that owns leases and enforcement, deployed by Coolify from that repo.
 
 ## Development
 

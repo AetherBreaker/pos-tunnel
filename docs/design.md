@@ -23,7 +23,7 @@ operator workstation                    relay (VPS container)                 PO
 | `posctl-admin`           | admin's workstation                          | Second binary in the same wheel: key generation and fleet configuration (section 7.9). Kept apart so its commands never show in `posctl --help`.                                                                                                                                    |
 | NinjaOne library scripts | NinjaOne → POS                               | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1.                                                   |
 | POS package              | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset.                                                                                                                                       |
-| relay                    | Docker container on the Coolify VPS          | Alpine `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched). Plus `tunnelctl` (lease/key management), `reaper` (enforcement) and a log watcher (which connection logged in with which key). |
+| relay                    | Docker container on the Coolify VPS          | Own repo (`AetherBreaker/pos-tunnel-relay`, submodule at `relay/`). `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched), plus a Python daemon that owns leases, tracks connections from `sshd`'s log and decides enforcement; `tunnelctl` and `tunnel-keys` are thin clients of it, and a root `cron` job does the killing. |
 
 ## 2. Threat model
 
@@ -88,7 +88,7 @@ definition, since a changed setting may be tampering.
 
 | Timer            | Value                                             | Authoritative on                  | Mirror                           |
 | ---------------- | ------------------------------------------------- | --------------------------------- | -------------------------------- |
-| Idle timeout     | 12h default; `--idle-timeout` may only shorten it | relay lease (`tunnelctl`, reaper) | POS lease file mtime (`Watch`)   |
+| Idle timeout     | 12h default; `--idle-timeout` may only shorten it | relay lease (relay daemon)        | POS lease file mtime (`Watch`)   |
 | Absolute maximum | 72h from `connect`                                | relay lease                       | POS session start time (`Watch`) |
 
 - Each side computes its deadlines from **its own clock**. `posctl` never sends a timestamp, so clock
@@ -102,24 +102,39 @@ definition, since a changed setting may be tampering.
 
 ### 6.1 Container
 
-- `openssh-server`, `iproute2` (for `ss`), a cron daemon, and Python for the log watcher. Entrypoint:
-  devkit-container's `run` in supervised mode, with the log watcher (section 6.5) as the supervised
-  app and `crond` and `sshd` (logging to syslog, not stderr) started before it. The container exits
-  when the watcher exits or stalls. How the relay fits devkit-container is open (section 11).
-- Published port 2222/tcp directly (not through Coolify's HTTP proxy — SSH is not TLS, so SNI routing
-  can't apply). Vultr firewall group and host `ufw` (if enabled) must allow it.
-- Volume `/data`: `state/` (lease files, the POS key file, the log). No key material: losing the
-  volume changes no identity.
-- Environment, both single-line so `posctl-admin`'s output pastes straight into Coolify's `.env` view:
-  `RELAY_SSH_PRIVATE_KEY` (base64 of the OpenSSH private key file) and `OPERATOR_KEYS`
-  (`<name>=<ed25519 base64>`, comma-separated). At each start the entrypoint writes the private key
-  to a root-only file under `/run` and the operator keys to `/etc/ssh/operator_keys` (root-owned;
-  not on the volume, because `sshd`'s `StrictModes` rejects a `jump` key file inside a `ctl`-owned
-  directory). It refuses to start if either is missing, and never generates a key pair.
-- Users: `tunnel` and `jump` have `/sbin/nologin` as their shell; `ctl` needs `/bin/sh`, because
-  `sshd` runs a `ForceCommand` through the login shell. Alpine creates accounts locked, which `sshd`
-  rejects even for key auth, so each gets password `*` (unusable, but not locked).
-  Container restarts drop live tunnels; POS `Watch` reconnects them within 2 minutes.
+- Its own public repo, `AetherBreaker/pos-tunnel-relay`, a submodule of this one at `relay/`: a
+  devkit-managed Python project (package `pos_tunnel_relay`), so `setup-project` owns its
+  Dockerfile and compose file. The image is devkit-container's template (Debian bookworm,
+  `uv:python3.14-bookworm-slim`); its `final` window adds `openssh-server` and `cron`.
+- Entrypoint: devkit-container's `run`, supervised. As root, the startup script `relay-startup`
+  runs first, then the supervisor drops to uid 999 and starts the daemon (`run-app-pos-tunnel-relay`,
+  section 6.5). The container exits when the daemon exits.
+- `relay-startup`:
+  1. Refuse to start unless `RELAY_SSH_PRIVATE_KEY` and `OPERATOR_KEYS` are set; never generate a
+     key pair.
+  2. Write the relay private key to a root-only file under `/run/relay/`, and the operator keys to
+     `/etc/ssh/operator_keys` (root-owned, 0644, one `ssh-ed25519 <base64> <name>` line each).
+  3. Recreate `/run/pos-tunnel/` empty, owned by 999 (a restart keeps the container's filesystem,
+     and pids start over, so old state would name unrelated processes); write the `tunnel` banner
+     there saying the relay is starting; link `/dev/log` to `/run/pos-tunnel/log.sock` (Docker
+     recreates `/dev` at each start, and 999 can't).
+  4. Start `sshd` (daemonized, logging to syslog) and `cron`, and record each one's pid and start
+     time in `/run/pos-tunnel/daemons.json`.
+
+  Both key variables are in `scrub_env`, so the daemon never sees them.
+- Compose: published port 2222/tcp directly (not through Coolify's HTTP proxy — SSH is not TLS, so
+  SNI routing can't apply); Vultr firewall group and host `ufw` (if enabled) must allow it.
+  `restart: always`, set by hand (setup-project only inserts `restart` when missing).
+- Persisted: devkit's `/app/persisted_data` bind mount holds `state/` (leases), `logs/` (the
+  heartbeat) and `aeth_ext`'s delivery history. No key material: losing it changes no identity.
+- Environment, both single-line so `posctl-admin`'s output pastes straight into Coolify's `.env`
+  view: `RELAY_SSH_PRIVATE_KEY` (base64 of the OpenSSH private key file) and `OPERATOR_KEYS`
+  (`<name>=<ed25519 base64>`, comma-separated).
+- Users: `tunnel` and `jump` have `nologin` as their shell; `ctl` needs `/bin/sh`, because `sshd`
+  runs a `ForceCommand` through the login shell; `keyreader` runs `tunnel-keys`. Accounts are
+  created locked, which `sshd` rejects even for key auth, so each gets password `*` (unusable, but
+  not locked).
+- Container restarts drop live tunnels; POS `Watch` reconnects them within 2 minutes.
 - DNS: a dedicated A record for the relay (not the Coolify UI hostname), not proxied through Cloudflare.
 
 ### 6.2 Users and `sshd_config`
@@ -132,16 +147,20 @@ definition, since a changed setting may be tampering.
 
 Global: key auth only, no root login, `AllowUsers tunnel jump ctl`, `GatewayPorts no`, no agent/X11/
 stream-local forwarding, `PermitTunnel no`, `ClientAliveInterval 30`/`ClientAliveCountMax 3`,
-`LogLevel VERBOSE` (logs key fingerprints). See `relay/sshd_config`.
+`LogLevel VERBOSE` (logs key fingerprints). See the relay repo's `sshd_config`.
 
 `AllowTcpForwarding remote` on `tunnel` is the key isolation control: without it, any POS could open
 connections to every other POS's tunnel port on the relay's loopback.
 
+Bookworm's OpenSSH is 9.2, which predates `PerSourcePenalties`. On 9.8 or later it must be tuned:
+by default it locks a whole source address out after a few failed logins, and the stores behind one
+NAT share an address, so the startup gate (section 6.3) would lock out every POS in the store.
+
 ### 6.3 POS keys
 
-`tunnel`'s keys come from `AuthorizedKeysCommand`, run as a dedicated `keyreader` user reading
-`/data/state/tunnel_keys` (owned by `ctl`, group `keyreader`, mode 0640). `tunnel` itself can't
-read the file, and has no way to run anything that could. One line per open session:
+`tunnel`'s keys come from `AuthorizedKeysCommand`: `tunnel-keys`, run as `keyreader`, asks the
+daemon (section 6.5) for the current lines and prints them. `tunnel` has no way to run anything. One
+line per open lease:
 
 ```
 restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle deadline, UTC>" ssh-ed25519 <base64>
@@ -149,78 +168,94 @@ restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle dead
 
 - `restrict,port-forwarding` re-enables forwarding only; `sshd_config` narrows that to remote forwarding.
 - `permitlisten` limits the key to its own port.
-- `expiry-time` blocks *new* logins after the deadline; it does not end a live connection (the reaper
-  does). `renew` rewrites it.
-- The public key string comes from a POS-writable custom field. `tunnelctl` accepts only
-  `^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$` (comment dropped) and builds the line itself, so a malicious value
-  can't inject options or extra lines.
-- Until the log watcher is listening on `/dev/log` (section 6.5), the command returns no keys, so a
-  POS logging in during container startup is refused and retries within 2 minutes instead of
-  holding a connection the reaper could never end. Meanwhile the pre-login `Banner` (`Match User
-  tunnel`; `sshd` re-reads the file per connection) says the relay is starting and to retry, for
-  anyone reading the POS's task log. Operators (`ctl`, `jump`) are unaffected.
+- `expiry-time` blocks *new* logins after the idle deadline; ending live connections is the
+  daemon's and killer's job. The daemon renders the line at each request, so a `renew` takes
+  effect at once.
+- The public key string comes from a POS-writable custom field. The daemon accepts only
+  `^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$` (comment dropped) and builds the line itself, so a malicious
+  value can't inject options or extra lines.
+- **Startup gate:** if the daemon isn't answering (not yet started, or stalled), `tunnel-keys`
+  prints nothing after a 5 s timeout, so a POS is refused and retries within 2 minutes rather than
+  holding a connection the daemon never saw. Meanwhile the pre-login `Banner` (`Match User tunnel`;
+  `sshd` re-reads the file per connection) says the relay is starting and to retry, for anyone
+  reading the POS's task log; the daemon clears it once it listens. Operators (`ctl`, `jump`) are
+  unaffected.
 
 ### 6.4 `tunnelctl`
 
-Runs as `ctl`. All state under `/data/state` (dir owned by `ctl:keyreader`, 0750; lease files
-0600, so `keyreader` can read only the keys file). Every call is appended to the log with the
-operator's name (its key's entry in `OPERATOR_KEYS`), the command and arguments; `open` also records
-the name in the lease.
+A thin client: `sshd` runs it as `ctl` with the operator's command in `SSH_ORIGINAL_COMMAND`. It sends
+the command and the operator's public key (from `ExposeAuthInfo`'s `SSH_USER_AUTH` file) to the
+daemon, prints the reply and exits with its status. It logs nothing itself. If the daemon isn't
+answering it says "relay starting: POS logins paused until the relay daemon is ready" and exits with
+a distinct status, which `posctl` reports (section 7.2).
 
-| Command                                                       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists, or if `tunnel_keys` already holds the same key (`sshd` uses the first matching line, so a second lease's POS would get the first one's port). Write lease file `leases/<port>` (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`, and the key's `fingerprint`, which the reaper matches against logins) and the key line. `--rebuild` is logged distinctly. |
-| `renew <port>`                                                | `idle_deadline = min(now + idle_seconds, absolute_deadline)`; rewrite `expiry-time`. Error if no lease or already expired.                                                                                                                                                                                                                                                                                                                                                                      |
-| `close <port>`                                                | Set `idle_deadline = now`; the reaper removes it within a minute.                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `status [<port>]`                                             | Deadlines, remaining time, and whether the port is listening. While the log watcher isn't ready: "relay starting: POS logins paused until the log watcher is ready".                                                                                                                                                                                                                                                                                                                            |
+The daemon names the operator from `/etc/ssh/operator_keys`, logs every call with that name, the
+command and its arguments, and records the name in the lease on `open`.
 
-`ctl` can't kill another user's processes, so `tunnelctl` never ends connections itself; it only marks
-leases. Enforcement is the reaper's job.
+| Command                                                       | Effect                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `open <port> <device-id> <idle-seconds> <pubkey> [--rebuild]` | Validate (port range, idle ≤ 43200, key format). Refuse if a lease for `<port>` exists, or if another lease holds the same key (`sshd` uses the first matching line, so a second lease's POS would get the first one's port). Store the lease (`device_id`, `idle_seconds`, `started`, `idle_deadline`, `absolute_deadline = started + 72h`, the key and its `fingerprint`, the operator). `--rebuild` is logged distinctly. |
+| `renew <port>`                                                | `idle_deadline = min(now + idle_seconds, absolute_deadline)`. Error if no lease or already expired.                                                                                                                                                                                                                                                                                                                          |
+| `close <port>`                                                | Set `idle_deadline = now`; the next enforcement pass removes it.                                                                                                                                                                                                                                                                                                                                                             |
+| `status [<port>]`                                             | Deadlines, remaining time, and whether the port is listening on the relay's loopback.                                                                                                                                                                                                                                                                                                                                        |
 
-### 6.5 Reaper and log watcher
+### 6.5 Daemon and killer
 
-`sshd` logs through syslog, where each login line carries the process ID of that connection's
-privileged `sshd` process and the key's fingerprint:
-`sshd-session[17]: Accepted publickey for tunnel from <ip> port <n> ssh2: ED25519 SHA256:<fp>`.
+**Daemon** (`run-app-pos-tunnel-relay`, Python, uid 999; the supervised app). One process owns all
+relay state and logging, so nothing needs a lock:
 
-**Log watcher** (Python, using `aeth_ext`; the container's supervised app, section 6.1). Receives
-`sshd`'s syslog messages on `/dev/log` and sends every line to the central log server through
-`aeth_ext`, for activity monitoring. It writes no log files and sends nothing to Docker's log beyond
-what `aeth_ext` itself emits there (emergency logging, log-server probes): Docker's and Coolify's log
-handling cost performance this doesn't need. For each `tunnel` login it creates one file in `/run/pos-tunnel/connections/`,
-named `<pid>-<start time>` (start time from `/proc/<pid>/stat`, readable without privileges) and
-holding the fingerprint; written under a temporary name and renamed into place, so a reader never
-sees a partial file. It never deletes. It writes its heartbeat from its receive loop, not a thread,
-so a stalled loop stops the beats: `sshd` waits for each log line to be received, so a stalled
-watcher stalls new logins, and the supervisor stops a watcher whose heartbeat goes stale, taking the
-container with it.
+- **Log intake.** Receives `sshd`'s syslog on `/run/pos-tunnel/log.sock` (via `/dev/log`). Each
+  `tunnel` login line carries the pid of that connection's privileged `sshd` process and the key's
+  fingerprint: `sshd[17]: Accepted publickey for tunnel from <ip> port <n> ssh2: ED25519
+  SHA256:<fp>`. The daemon records each login in memory as pid, start time (from `/proc/<pid>/stat`,
+  readable without privileges; pids get reused) and fingerprint.
+- **Requests.** Serves `tunnelctl` and `tunnel-keys` on `/run/pos-tunnel/ctl.sock`, one JSON line
+  each way. The caller's uid (`SO_PEERCRED`) decides what it may ask: `ctl` the section 6.4
+  commands, `keyreader` the key lines only, anyone else nothing.
+- **Leases.** One JSON file per lease in `state/leases/`, written to a temporary name and renamed;
+  loaded at start, so a restart keeps every lease.
+- **Enforcement,** every 5 s: forget connections whose process is gone (no such pid, or a different
+  start time); drop each lease past `min(idle_deadline, absolute_deadline)`, which removes its key
+  line at once; then request a kill for every connection whose fingerprint belongs to no remaining
+  lease. That ends every connection of an expired, closed or hand-deleted lease, spare ones
+  included, and nothing else. A `tunnel` `sshd` process it never saw log in is reported and left
+  running.
+- **Logging.** Every `sshd` line and every audit record goes to the central log server through
+  `aeth_ext` (socket mode, configured by TOML like any `aeth_ext` app). `aeth_ext` sends
+  synchronously on the logging thread, so the main loop only hands lines to a bounded in-memory
+  queue (10,000) drained by a sender thread; on overflow it drops and counts, and reports the count
+  once delivery resumes. `aeth_ext` keeps its own 7-day delivery history in `persisted_data`.
+- **Liveness.** One single-threaded loop (`selectors`, waking at least every 5 s) does intake,
+  requests, enforcement and the heartbeat devkit-container reads, so a stalled loop stops the beats
+  and the supervisor's `/fail` ping alerts. It exits non-zero, ending the container, if `sshd` or
+  `cron` is no longer the process `daemons.json` names, or the killer's beat is older than 3 minutes.
 
-**Reaper** (root `crond` job, every minute; serializes with `tunnelctl` on a `flock` over the state
-dir, never with the watcher):
+**Killer** (`relay-killer`, root `cron` job, every minute). Only root can signal `sshd`'s connection
+processes, so this is the one privileged step, and it decides nothing:
 
-1. Delete each connection file whose process is gone: no such pid, or a different start time (pids
-   get reused).
-2. For each lease past `min(idle_deadline, absolute_deadline)`: delete its key line and lease file,
-   log it. The key line goes first, so the POS can't log back in once step 3 ends its connections.
-3. For each connection file whose fingerprint belongs to no remaining lease: kill that process and
-   its children, delete the file, log it. This ends every connection of an expired, closed or
-   hand-deleted lease, spare ones included, and nothing else.
-4. Report each `tunnel` `sshd` process that has no connection file (its login was never recorded),
-   and leave it running.
+1. For each request in `/run/pos-tunnel/kill/` (`<pid>-<start time>`): if that pid still has that
+   start time and its command line is an `sshd` process of user `tunnel`, kill it. Delete the
+   request either way.
+2. Fail closed: if the daemon's heartbeat is older than 3 minutes, kill every `tunnel` `sshd`
+   process. A stalled daemon can no longer enforce deadlines, so no tunnel outlives it.
+3. Write its own beat to `/run/pos-tunnel/killer.beat`.
+
+It logs nothing; the daemon sees each disconnect in `sshd`'s log and records it.
 
 Why this shape:
 
 - The container can't see which process holds a port: `sshd`'s children refuse inspection and
-  Docker withholds `CAP_SYS_PTRACE`, so `ss -p` shows no process.
+  Docker withholds `CAP_SYS_PTRACE`, so `ss -p` shows no process. The login line is the only link
+  from a key to a process.
 - `sshd` checks a key only at login, so a POS that opened a spare connection during its lease could
-  re-bind its port after the holder was killed. Matching on the fingerprint ends all of them.
-- Killing every `tunnel` connection instead would interrupt other sessions.
-- One file per connection, created by rename and removed by unlink, needs no lock between the
-  watcher and the reaper, so neither can stall the other, and nothing grows with uptime.
-- `/run/pos-tunnel/` is emptied at every container start: a restart has already ended every
-  connection, and pids start over from 1, so old files would name unrelated processes.
+  re-bind its port after the holder was killed. Matching on the fingerprint ends all of them, and
+  killing every `tunnel` connection instead would interrupt other sessions.
+- One owner for leases, connections and logging: short-lived processes can't each hold an
+  `aeth_ext` connection, and a single owner needs no locks.
+- Failure modes stay safe: a stalled daemon freezes the relay (no logins, no `tunnelctl`) and the
+  killer drops every tunnel; a dead `sshd`, `cron` or killer restarts the container.
 
-The reaper doesn't depend on the POS cooperating: a client connecting with `ssh -N` never runs a
+Enforcement doesn't depend on the POS cooperating: a client connecting with `ssh -N` never runs a
 session command, so nothing that runs inside the session could enforce a deadline.
 
 ## 7. Flows
@@ -376,7 +411,7 @@ reboot during a session brings the tunnel back, and a reboot after expiry cleans
 
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
 
-`close`, wait until `tunnelctl status` shows the port released (the reaper runs every minute), then
+`close`, wait until `tunnelctl status` shows the port released (the killer runs every minute), then
 `connect --rebuild`. New session key, new relay lease, new 72h maximum. Logged distinctly by
 `tunnelctl`.
 
@@ -487,8 +522,12 @@ Host pos-<slug>
 - Up to ~2 minutes to recover a dropped tunnel (`Watch` interval).
 - The POSes restart nightly at 3 AM: an open session survives (`Watch` restores the tunnel at
   startup), but its tunnel is down for a few minutes.
-- If the relay's log watcher exits or stalls, the container stops and every tunnel drops until it
-  restarts.
+- If the relay daemon exits, the container restarts and every tunnel drops until the POSes
+  reconnect. If it stalls, the relay freezes (no logins, no `tunnelctl`), the killer drops every
+  tunnel, and it stays down until someone restarts it (devkit-container's supervisor alerts but
+  doesn't restart an unhealthy app yet).
+- The relay can't start while the central log server is unreachable (`aeth_ext` exits at startup);
+  `restart: always` brings it up within about a minute of the log server returning.
 - `connect` takes as long as NinjaOne takes to dispatch a script (typically tens of seconds).
 - `relay point` ends every open session.
 - Commands run in a session aren't recorded: the relay sees only encrypted traffic, and recording on
@@ -523,7 +562,8 @@ Host pos-<slug>
 Verified so far: the NinjaOne items in sections 3 and 8 (from NinjaOne's documentation and its
 OpenAPI spec, not yet against the tenant); `permitlisten="localhost:<port>"` accepting the Windows
 client's `-R <port>:localhost:22`; `ExposeAuthInfo` handing `tunnelctl` the operator's public key
-under its `ForceCommand` (both against the relay image). Still open:
+under its `ForceCommand` (both against OpenSSH 10 on Alpine, before the relay moved to bookworm's
+9.2). Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
   ones (its documentation shows positional only).
@@ -533,14 +573,10 @@ under its `ForceCommand` (both against the relay image). Still open:
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 - `ssh-keygen -A` regenerating the Win32-OpenSSH server key pair in `C:\ProgramData\ssh` (`rekey`).
-- devkit-container for the relay (section 6.1):
-  - Its supervisor only reports a stale app heartbeat (log line and `/fail` ping); it must also stop
-    the watcher and exit. Expected to be a small update.
-  - `sshd` and `crond` are long-running root daemons, but its startup scripts must exit, so they
-    would start in the background, and nothing would notice `sshd` dying.
-  - Its Dockerfile template is Debian-based; the relay image is Alpine.
-  - Startup order: startup scripts run before the app, so `sshd` starts before the watcher
-    listens; POS logins are held off until it does (section 6.3).
+- On OpenSSH 9.2 (the relay's): the two checks above again; the login line's format and that its
+  pid is the connection's privileged process, whose command line names user `tunnel` (section 6.5);
+  `sshd` blocking on a full `/dev/log` rather than dropping the line (what makes a stalled daemon
+  freeze logins instead of letting one through unrecorded).
 
 ## 12. Deployment order
 
@@ -551,7 +587,7 @@ under its `ForceCommand` (both against the relay image). Still open:
    `posctl login`; write `config.toml`, add the `Include`.
 3. Release: `posctl-admin signing keygen`; `poe sign-pos`; commit; `poe release`.
 4. Relay: `posctl-admin relay keygen --activate <host>[:<port>]` and `operator list` (or `add` for a second
-   operator); paste both lines into Coolify; deploy; add the DNS record; open 2222 in the Vultr
-   firewall.
+   operator); in Coolify, a Docker Compose application from `pos-tunnel-relay`, with both lines in its
+   environment; deploy; add the DNS record; open 2222 in the Vultr firewall.
 5. With only one test device in the POS policy: `posctl-admin relay point <host>`, then test end to
    end. Then add the fleet to the policy and schedule `Install-PosTunnel` daily.
