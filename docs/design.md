@@ -562,8 +562,12 @@ Host pos-<slug>
 Verified so far: the NinjaOne items in sections 3 and 8 (from NinjaOne's documentation and its
 OpenAPI spec, not yet against the tenant); `permitlisten="localhost:<port>"` accepting the Windows
 client's `-R <port>:localhost:22`; `ExposeAuthInfo` handing `tunnelctl` the operator's public key
-under its `ForceCommand` (both against OpenSSH 10 on Alpine, before the relay moved to bookworm's
-9.2). Still open:
+under its `ForceCommand` (both against OpenSSH 10 on Alpine, and again on bookworm's 9.2 with a Linux
+client); on 9.2, the login line `sshd[<pid>]: Accepted publickey for tunnel from <ip> port <n> ssh2:
+ED25519 SHA256:<fp>` naming the connection's root `sshd: tunnel [priv]` process (its child
+`sshd: tunnel` runs as `tunnel`), whose start time and command line uid 999 can read but not signal;
+the disconnect line naming the child's pid instead, so the daemon detects ends through `/proc`; and
+`sshd` blocking a new login while `/dev/log` isn't being read. Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
   ones (its documentation shows positional only).
@@ -573,10 +577,8 @@ under its `ForceCommand` (both against OpenSSH 10 on Alpine, before the relay mo
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 - `ssh-keygen -A` regenerating the Win32-OpenSSH server key pair in `C:\ProgramData\ssh` (`rekey`).
-- On OpenSSH 9.2 (the relay's): the two checks above again; the login line's format and that its
-  pid is the connection's privileged process, whose command line names user `tunnel` (section 6.5);
-  `sshd` blocking on a full `/dev/log` rather than dropping the line (what makes a stalled daemon
-  freeze logins instead of letting one through unrecorded).
+- Killing a connection's `[priv]` process ends its child and frees the forwarded port (the relay's
+  integration tests).
 
 ## 12. Deployment order
 
