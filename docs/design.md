@@ -23,7 +23,7 @@ operator workstation                    relay (VPS container)                 PO
 | `posctl-admin`           | admin's workstation                          | Second binary in the same wheel: key generation and fleet configuration (section 7.9). Kept apart so its commands never show in `posctl --help`.                                                                                                                                    |
 | NinjaOne library scripts | NinjaOne → POS                               | Two small PowerShell scripts pasted into NinjaOne once and never changed: `Install-PosTunnel` (downloads, verifies and installs the POS package) and `Invoke-PosTunnel` (runs an action from the installed package). Section 7.1.                                                   |
 | POS package              | GitHub Releases → `C:\ProgramData\PosTunnel` | PowerShell, run as SYSTEM: `Setup`, `Open`, `Close`, `Touch`, and `Watch`, which owns the session lifecycle on the POS. Signed release asset.                                                                                                                                       |
-| relay                    | Docker container on the Coolify VPS          | Own repo (`AetherBreaker/pos-tunnel-relay`, submodule at `relay/`). `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched), plus a Python daemon that owns leases, tracks connections from `sshd`'s log and decides enforcement; `tunnelctl` and `tunnel-keys` are thin clients of it, and a root `cron` job does the killing. |
+| relay                    | Docker container on the Coolify VPS          | Own repo (`AetherBreaker/pos-tunnel-relay`, submodule at `relay/`). `sshd` on its own published port (2222), separate from the host's `sshd` (Coolify manages the host over SSH as root; it must not be touched), plus a Python daemon that owns leases, records connections from `tunnel-keys` and decides enforcement; `tunnelctl` and `tunnel-keys` are thin clients of it, and a root `cron` job does the killing. |
 
 ## 2. Threat model
 
@@ -175,8 +175,8 @@ restrict,port-forwarding,permitlisten="localhost:<port>",expiry-time="<idle dead
   `^ssh-ed25519 [A-Za-z0-9+/]+={0,2}$` (comment dropped) and builds the line itself, so a malicious
   value can't inject options or extra lines.
 - **Startup and stall gates:** `sshd` logs to the daemon's FIFO (section 6.5), so until the daemon
-  opens it `sshd` doesn't even listen, and while the daemon stalls every new connection blocks on
-  its first log line, operators' included. If `sshd` gets through but the daemon doesn't answer,
+  opens it `sshd` doesn't even listen, and while the daemon stalls, once the pipe's buffer (64 KiB)
+  is full, every new connection blocks on its next log line, operators' included. If `sshd` gets through but the daemon doesn't answer,
   `tunnel-keys` prints nothing after a 5 s timeout, so the POS is refused. Either way a POS retries
   within 2 minutes, and no POS holds a connection the daemon didn't record.
 
@@ -259,8 +259,8 @@ Why this shape:
   killing every `tunnel` connection instead would interrupt other sessions.
 - One owner for leases, connections and logging: short-lived processes can't each hold an
   `aeth_ext` connection, and a single owner needs no locks.
-- The FIFO, not syslog: only `sshd` writes it, so a stalled daemon blocks `sshd` (no new logins: the
-  relay freezes in its safe state) and nothing else; owning `/dev/log` made `cron` block too, and
+- The FIFO, not syslog: only `sshd` writes it, so a stalled daemon blocks `sshd` once the pipe fills
+  (no new logins: the relay freezes in its safe state) and nothing else; owning `/dev/log` made `cron` block too, and
   with it the killer.
 - Failure modes stay safe: a stalled daemon freezes the relay and the killer drops every tunnel; a
   dead `sshd`, `cron` or daemon ends the container, and `restart: always` brings it back.
@@ -581,7 +581,9 @@ the disconnect line naming the child's pid instead, so the daemon detects ends t
 `sshd` blocking a new login while `/dev/log` isn't being read; `AuthorizedKeysCommand`'s parent being the
 connection's `[priv]` process, called once per offered key plus once to verify the accepted one; `sshd -E`
 to a FIFO: `sshd` waits to open it until a reader does, per-connection processes write it too, a full pipe
-holds new logins, and a vanished reader ends the connection that tried to log (`Broken pipe`); Debian's
+holds new logins, a vanished reader ends the connection that tried to log (`Broken pipe`), its lines are
+the bare message ending in CRLF (no pid, no time), and a read-only reader polls readable at EOF forever
+once a writer has come and gone, so the daemon opens it read-write; Debian's
 `cron` blocking every job (even with `-L 0`) while `/dev/log` isn't read. Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
