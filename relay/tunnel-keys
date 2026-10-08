@@ -1,4 +1,0 @@
-#!/bin/sh
-# sshd AuthorizedKeysCommand for `tunnel`, run as `keyreader`. Design: docs/design.md, section 6.3.
-[ "$1" = tunnel ] || exit 0
-cat /data/state/tunnel_keys 2>/dev/null || true

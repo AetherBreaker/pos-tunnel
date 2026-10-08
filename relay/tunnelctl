@@ -1,5 +1,0 @@
-#!/bin/sh
-# Session leases and POS keys; forced command for `ctl`, arguments in SSH_ORIGINAL_COMMAND.
-# Commands: open, renew, close, status. Design: docs/design.md, section 6.4.
-echo 'tunnelctl: not implemented yet' >&2
-exit 1

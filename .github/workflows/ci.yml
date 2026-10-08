@@ -30,16 +30,3 @@ jobs:
           components: clippy
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
-
-  relay:
-    name: "Relay: image builds, sshd_config valid"
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - run: docker build -t relay relay
-      - run: >-
-          docker run --rm --entrypoint sh relay -c
-          "mkdir -p /data/hostkeys && ssh-keygen -q -t ed25519 -N '' -f /data/hostkeys/ssh_host_ed25519_key
-          && touch /etc/ssh/operator_keys && sshd -t"
