@@ -584,7 +584,8 @@ to a FIFO: `sshd` waits to open it until a reader does, per-connection processes
 holds new logins, a vanished reader ends the connection that tried to log (`Broken pipe`), its lines are
 the bare message ending in CRLF (no pid, no time), and a read-only reader polls readable at EOF forever
 once a writer has come and gone, so the daemon opens it read-write; Debian's
-`cron` blocking every job (even with `-L 0`) while `/dev/log` isn't read. Still open:
+`cron` blocking every job (even with `-L 0`) while `/dev/log` isn't read; killing a connection's `[priv]` process and its child frees the forwarded
+port (the relay's integration tests). Still open:
 
 - NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
   ones (its documentation shows positional only).
@@ -594,8 +595,6 @@ once a writer has come and gone, so the daemon opens it read-write; Debian's
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 - `ssh-keygen -A` regenerating the Win32-OpenSSH server key pair in `C:\ProgramData\ssh` (`rekey`).
-- Killing a connection's `[priv]` process ends its child and frees the forwarded port (the relay's
-  integration tests).
 
 ## 12. Deployment order
 
