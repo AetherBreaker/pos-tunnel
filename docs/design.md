@@ -631,10 +631,15 @@ the NinjaOne console: in 64-bit PowerShell 5.1, the agent runs
 parameters bind (`-Action Open` bound,
 the rest arriving as `-Name value` pairs for `Invoke-PosTunnel` to re-splat). Every POS runs Windows 11,
 whose bundled OpenSSH (8.6 or later) has `ssh-keygen -Y`, so `Install-PosTunnel` can verify a release
-on a fresh POS. Still open:
+on a fresh POS. Through the API (`POST /v2/device/{id}/script/run`, 204) the agent runs the same
+command line. That call needs a user's token: a client-credentials token gets `403
+user_context_required`, so `posctl` signs in with the authorization-code grant (scope
+`monitoring management offline_access`), and each refresh returns a new refresh token. Reads
+(devices, scripts, activities) work with either. `GET /v2/device/{id}/activities` shows the run as
+`START_REQUESTED`, `STARTED`, then `COMPLETED` within about 20 s, with the script's output in
+`message`. `GET /v2/devices` returns `rolePolicyId` and no `policyId` key (no device in the tenant has
+an override). Still open:
 
-- The same parameter string sent through the API's script run rather than the console (`posctl`'s
-  path).
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 
