@@ -30,7 +30,8 @@ try {
         exit 0
     }
 
-    # sshd is Manual, so after a restart it is down until this starts it.
+    # sshd is Manual, so after a restart it is down until this starts it. Not listening (a slow boot) keeps
+    # the session for the next run to retry; listening beyond loopback ends it.
     $step = 'sshd'
     $problem = Start-Sshd
     if ($problem) {

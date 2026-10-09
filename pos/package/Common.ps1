@@ -33,18 +33,27 @@ function Write-Result([string]$Status, [string]$Step, [string]$Detail = '') {
     Write-Output ("$Status`t$Step" + $(if ($Detail) { "`t$Detail" } else { '' }))
 }
 
-# Every package script and Install-PosTunnel serialize on this mutex: Watch runs every 2 minutes and would
-# otherwise tear down a session Open is halfway through building. Mutex ownership is per thread and
-# recursive, so a script run in-process by a holder (Install -> Setup, Install -> Close) gets it at once.
-# A holder that died leaves it abandoned, which hands it to the next waiter; every script converges from
-# whatever state it finds, so that is safe.
+# Every package script and Install-PosTunnel serialize on an exclusive open of $Root\lock: Watch runs every
+# 2 minutes and would otherwise tear down a session Open is halfway through building. Not a named mutex:
+# any user can create and hold one, which would stop Watch ever ending a session; nobody but SYSTEM can
+# open this folder. Windows closes the handle with its process, so a holder that died frees it, and every
+# script converges from whatever state it finds. A script run in-process by the holder (Install -> Setup,
+# Install -> Close) shares its handle through $global:PosTunnelLock and leaves releasing it to the holder.
 function Enter-Lock([int]$TimeoutSeconds) {
-    $script:Lock = New-Object Threading.Mutex($false, 'Global\PosTunnel')
-    try { return $script:Lock.WaitOne($TimeoutSeconds * 1000) } catch [Threading.AbandonedMutexException] { return $true }
+    if ($global:PosTunnelLock) { return $true }
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            $global:PosTunnelLock = [IO.File]::Open("$Root\lock", 'OpenOrCreate', 'ReadWrite', 'None')
+            $script:OwnsLock = $true
+            return $true
+        } catch [IO.IOException] { if ((Get-Date) -gt $deadline) { return $false } }
+        Start-Sleep -Milliseconds 500
+    }
 }
 
 function Exit-Lock {
-    if ($script:Lock) { $script:Lock.ReleaseMutex(); $script:Lock.Dispose(); $script:Lock = $null }
+    if ($script:OwnsLock) { $global:PosTunnelLock.Dispose(); $global:PosTunnelLock = $null; $script:OwnsLock = $false }
 }
 
 # A protected (non-inheriting) ACL granting FullControl to each SID in $FullControl and read to $ReadOnly.
@@ -102,7 +111,9 @@ function Set-FileContent([string]$Path, [string]$Content, [string[]]$FullControl
 }
 
 # Starts sshd and checks every socket it listens on is loopback: the Windows firewall is off, so this is
-# the only thing keeping sshd off the store LAN. Returns $null when it is, else what it found.
+# the only thing keeping sshd off the store LAN. Returns $null when it is, else where it listens. Throws
+# when sshd isn't listening (a slow boot, say), after stopping it so it can't bind later unchecked: the
+# caller decides whether that ends the session, where exposure always does.
 function Start-Sshd {
     if ((Get-Service sshd).Status -ne 'Running') { Start-Service sshd }
     $sshdPid = (Get-CimInstance Win32_Service -Filter "Name='sshd'").ProcessId
@@ -112,7 +123,15 @@ function Start-Sshd {
         if ($listeners) { break }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
-    if (-not $listeners) { return 'no listener' }
+    # sshd binds its addresses one after another, so a first look can catch only the loopback one bound.
+    if ($listeners) {
+        Start-Sleep -Seconds 1
+        $listeners = @(Get-NetTCPConnection -State Listen -OwningProcess $sshdPid -ErrorAction SilentlyContinue)
+    }
+    if (-not $listeners) {
+        Stop-Service sshd -Force
+        throw 'not listening; stopped it'
+    }
     $exposed = @($listeners | Where-Object { $_.LocalAddress -ne '127.0.0.1' -and $_.LocalAddress -ne '::1' })
     if ($exposed) { return 'listening on ' + (($exposed | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort)" }) -join ', ') }
     return $null

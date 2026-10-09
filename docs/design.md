@@ -308,7 +308,10 @@ setup, and a run with nothing to do changes nothing.
    junction), delete it first (a junction as a link, never followed) and install from scratch: a
    session in progress is lost and `Setup` generates a new relay key. `C:\ProgramData` lets any user
    create a folder and own it, and SYSTEM runs `Watch.ps1` from this one every 2 minutes, so a folder
-   a standard user created or wrote into first would be their path to SYSTEM.
+   a standard user created or wrote into first would be their path to SYSTEM. Check again after
+   creating it: creating a folder that already exists leaves it as it is, so a user who recreates it
+   between the delete and the create would otherwise slip through. Then take the lock (section 7.2),
+   which lives in this folder.
 2. If a session is open (`session.json` exists): without `-Force`, report "deferred", exit 0, since
    neither an upgrade nor setup repair should change `sshd` or the tasks under a live session. With
    `-Force` (used by `relay point`), run the installed `Close` first.
@@ -398,13 +401,16 @@ base64 of the ed25519 public key, so NinjaOne's parameter string needs no quotin
 left over, from a `connect` that timed out, say) → write `ssh-ed25519 <base64>` as the sole line of
 `administrators_authorized_keys` (SYSTEM+Administrators ACL, or `sshd` ignores it) → enable `support`
 → start `sshd`, then verify its listeners are loopback only (abort and tear down if not — the Windows
-firewall is off, so this is the only thing keeping `sshd` off the store LAN) → write `session.json`
+firewall is off, so this is the only thing keeping `sshd` off the store LAN; a second look a second
+later, since `sshd` binds its addresses one at a time) → write `session.json`
 (`port`, `idle_seconds`, `started` in Unix seconds) and touch `lease` → set `PosTunnel-Link`'s action
 to `ssh -N -F none -R <port>:127.0.0.1:22 -p <relay port> -i relay_key -o ExitOnForwardFailure=yes
 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o BatchMode=yes -o StrictHostKeyChecking=yes
 -o UserKnownHostsFile=known_hosts -o IdentitiesOnly=yes tunnel@<relay>` (`127.0.0.1`, not `localhost`,
 which Windows resolves to `::1` first, where `sshd` isn't listening; only `relay_key` is offered: the
-relay records every key a POS offers, section 6.5) → enable and start `PosTunnel-Link`.
+relay records every key a POS offers, section 6.5) → enable and start `PosTunnel-Link`. If any step
+fails, tear down: the operator is told `Open` failed, and a `session.json` left behind would have
+`Watch` keep `sshd` and `support` up until the idle timeout.
 
 **`Watch`** (POS, SYSTEM, every 2 min and at startup):
 1. No `session.json` → ensure the idle state and exit: `sshd` Manual and stopped (an OpenSSH MSI
@@ -415,7 +421,8 @@ relay records every key a POS offers, section 6.5) → enable and start `PosTunn
    `administrators_authorized_keys`, disable `support` and end its processes, delete `session.json`
    and `lease`, disable `PosTunnel-Link`.
 3. Otherwise start `sshd` if it isn't running (it is Manual, so a restart leaves it down) and recheck
-   it is loopback only, tearing down if not; enable `support`; start `PosTunnel-Link` if it isn't
+   it is loopback only, tearing down if not. If it isn't listening within 15 s (a slow boot), stop it
+   and keep the session: the next run retries. Enable `support`; start `PosTunnel-Link` if it isn't
    running.
 
 The idle state and the teardown are one function, `Stop-Session` in `Common.ps1`, and the only
@@ -423,11 +430,13 @@ teardown implementation: `Watch`, `Close`, `Open` (replacing a leftover session)
 `Install-PosTunnel -Force` (through `Close`) all call it. The startup trigger means a reboot during a
 session brings `sshd` and the tunnel back, and a reboot after expiry cleans up.
 
-**Lock.** Every package script and `Install-PosTunnel` hold the machine-wide mutex `Global\PosTunnel`
-while they work, so `Watch` can't tear down a session `Open` is halfway through building. `Watch`
-waits 60 s for it and otherwise skips its run; the others wait 10 minutes. Ownership is per thread
-and recursive, so a script run in-process by the holder (`Install-PosTunnel` → `Setup`, `-Force` →
-`Close`) gets it at once.
+**Lock.** Every package script and `Install-PosTunnel` hold an exclusive open of
+`C:\ProgramData\PosTunnel\lock` while they work, so `Watch` can't tear down a session `Open` is
+halfway through building. Not a named mutex: any user can create and hold one, which would stop `Watch`
+ever ending a session, while only SYSTEM can open this folder. Windows closes the handle with its
+process, so a holder that died frees it. `Watch` waits 60 s for it and otherwise skips its run; the
+others wait 10 minutes. A script run in-process by the holder (`Install-PosTunnel` → `Setup`,
+`-Force` → `Close`) shares its handle.
 
 ### 7.3 `posctl keepalive <DisplayName>`
 

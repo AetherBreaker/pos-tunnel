@@ -44,36 +44,52 @@ function Remove-Tree([string]$Path) {
     if (Test-Path -LiteralPath $Path) { throw "could not delete $Path" }
 }
 
-# Same mutex as the package's Common.ps1; the in-process Setup and Close re-enter it on this thread.
-$lock = New-Object Threading.Mutex($false, 'Global\PosTunnel')
-try { $held = $lock.WaitOne(600000) } catch [Threading.AbandonedMutexException] { $held = $true }
-if (-not $held) { Write-Result 'FAILED' 'lock' 'another PosTunnel script held it for 10 minutes'; exit 1 }
+# Any user can create a folder in C:\ProgramData and own it, and SYSTEM runs Watch.ps1 from this one every
+# 2 minutes, so it is used only as SYSTEM's own: a real folder (not a link), owner SYSTEM, one protected
+# FullControl rule for SYSTEM.
+function Test-SystemOnly {
+    $item = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { return $false }
+    $acl = Get-Acl -LiteralPath $Root
+    $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+    return $acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $SystemSid -and
+        $rules.Count -eq 1 -and $rules[0].IdentityReference.Value -eq $SystemSid -and
+        $rules[0].AccessControlType -eq 'Allow' -and $rules[0].FileSystemRights -eq 'FullControl'
+}
 
 $step = 'folder'
 try {
-    # 1. Any user can create a folder in C:\ProgramData and own it, and SYSTEM runs Watch.ps1 from this
-    # one every 2 minutes, so it is used only as SYSTEM's own: owner SYSTEM, SYSTEM-only, not inherited.
-    $item = Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue
-    $secure = $false
-    if ($item -and $item.PSIsContainer -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-        $acl = Get-Acl -LiteralPath $Root
-        $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
-        $secure = $acl.AreAccessRulesProtected -and $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -eq $SystemSid -and
-            $rules.Count -eq 1 -and $rules[0].IdentityReference.Value -eq $SystemSid -and
-            $rules[0].AccessControlType -eq 'Allow' -and $rules[0].FileSystemRights -eq 'FullControl'
-    }
-    if ($secure) { Write-Result 'OK' $step }
+    # 1. The folder, before the lock, which lives in it.
+    if (Test-SystemOnly) { Write-Result 'OK' $step }
     else {
-        if ($item) { Remove-Tree $Root; Write-Result 'CHANGED' $step 'not SYSTEM-only: deleted, installing from scratch' }
+        if (Get-Item -LiteralPath $Root -Force -ErrorAction SilentlyContinue) {
+            Remove-Tree $Root
+            Write-Result 'CHANGED' $step 'not SYSTEM-only: deleted, installing from scratch'
+        }
         $acl = New-Object Security.AccessControl.DirectorySecurity
         $acl.SetAccessRuleProtection($true, $false)
         $acl.SetOwner((New-Object Security.Principal.SecurityIdentifier($SystemSid)))
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
             (New-Object Security.Principal.SecurityIdentifier($SystemSid)), 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')))
-        # Created with its ACL, so it is never briefly open to other users.
+        # Created with its ACL, so it is never briefly open to other users. CreateDirectory leaves a folder
+        # that already exists as it is, so one a user recreated since the delete passes through untouched:
+        # check again.
         $null = [IO.Directory]::CreateDirectory($Root, $acl)
+        if (-not (Test-SystemOnly)) { throw "$Root was recreated by someone else first; the next run deletes it again" }
         Write-Result 'CHANGED' $step 'created'
     }
+
+    # The package's lock (Common.ps1, Enter-Lock); the in-process Setup and Close share this handle.
+    $step = 'lock'
+    $deadline = (Get-Date).AddMinutes(10)
+    while (-not $global:PosTunnelLock) {
+        try { $global:PosTunnelLock = [IO.File]::Open("$Root\lock", 'OpenOrCreate', 'ReadWrite', 'None') }
+        catch [IO.IOException] {
+            if ((Get-Date) -gt $deadline) { throw 'another PosTunnel script held it for 10 minutes' }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+
     $installed = 0
     if (Test-Path -LiteralPath "$Root\current") { $installed = [int](Get-Content -LiteralPath "$Root\current" -Raw).Trim() }
 
@@ -185,5 +201,5 @@ try {
     }
 } catch {
     Write-Result 'FAILED' $step $_.Exception.Message
-} finally { $lock.ReleaseMutex() }
+} finally { if ($global:PosTunnelLock) { $global:PosTunnelLock.Dispose(); $global:PosTunnelLock = $null } }
 exit [int]($script:failed -gt 0)

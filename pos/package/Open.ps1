@@ -28,9 +28,11 @@ foreach ($required in $RelayKey, $RelayFile, $KnownHosts, "$OpenSsh\sshd.exe") {
 if (-not (Enter-Lock 600)) { Write-Result 'FAILED' 'lock' 'another PosTunnel script held it for 10 minutes'; exit 1 }
 try {
     # The relay refuses a second lease for this port, so a session already here is left over (a connect
-    # that timed out, say) and safe to replace.
+    # that timed out, say) and safe to replace. Converging to idle either way also stops a PosTunnel-Link
+    # left running without one, which would otherwise keep its old arguments through the Start below.
     $step = 'previous session'
-    if (Test-Path -LiteralPath $SessionFile) { Write-Result 'CHANGED' $step 'replacing'; Stop-Session }
+    if (Test-Path -LiteralPath $SessionFile) { Write-Result 'CHANGED' $step 'replacing' }
+    Stop-Session
 
     $step = 'session key'
     $null = Set-FileContent $AuthorizedKeys "ssh-ed25519 $SessionKey`r`n" $SystemSid, $AdminsSid
@@ -42,11 +44,7 @@ try {
 
     $step = 'sshd'
     $problem = Start-Sshd
-    if ($problem) {
-        Write-Result 'FAILED' $step "$problem; tearing down"
-        Stop-Session
-        exit 1
-    }
+    if ($problem) { throw "$problem; tearing down" }
     Write-Result 'CHANGED' $step 'started, loopback only'
 
     $step = 'session state'
@@ -69,6 +67,9 @@ try {
     Start-ScheduledTask -TaskName $LinkTask
     Write-Result 'CHANGED' $step "port $Port via $($relay.host):$($relay.port)"
 } catch {
+    # Whatever got this far comes down: the operator was told Open failed, and a session.json left behind
+    # would have Watch keep sshd and support up until the idle timeout.
     Write-Result 'FAILED' $step $_.Exception.Message
+    try { Stop-Session } catch { Write-Result 'FAILED' 'teardown' $_.Exception.Message }
 } finally { Exit-Lock }
 exit [int]($script:failed -gt 0)
