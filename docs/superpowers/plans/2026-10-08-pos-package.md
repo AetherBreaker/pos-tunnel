@@ -1075,7 +1075,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 10: Commit, push, and watch the tests pass**
+- [x] **Step 10: Commit, push, and watch the tests pass**
 
 Run the local check (expected: no output), then:
 
@@ -1107,7 +1107,7 @@ Run the CI check. Expected: `pos-integration: success`, `Tests Passed: 3`. The f
 
 These tests pin behaviour Task 1's `Install-PosTunnel` already has, so they are expected to pass at once. A reviewer can still reject them separately: they are the rollback protection and the archive vetting (design 7.1 steps 3-4). If one fails, the fix goes in `Install-PosTunnel.ps1`, never in the test's expectation.
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 Append to `tests/pos/PosTunnel.Tests.ps1`:
 

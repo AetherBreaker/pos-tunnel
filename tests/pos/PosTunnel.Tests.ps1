@@ -57,3 +57,75 @@ Describe 'Install-PosTunnel' {
         $r.Text | Should -Not -Match 'CHANGED'
     }
 }
+
+Describe 'Install-PosTunnel refusals and upgrades' {
+    It 'refuses a release signed by another key, keeping the installed version' {
+        Publish-TestRelease 2 -SigningKey "$Work\other_signing_key"
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tsignature`tbad signature: .*verif"
+        (Get-Content "$Root\current" -Raw).Trim() | Should -Be '1'
+        "$Root\versions\2" | Should -Not -Exist
+    }
+
+    It 'refuses an archive entry the manifest lacks, writing nothing from the archive' {
+        Publish-TestRelease 2 -ExtraEntry
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tpackage`tunexpected archive entry 'Extra.ps1'"
+        Get-ChildItem $Root -Recurse -Filter 'Extra.ps1' | Should -BeNullOrEmpty
+        "$Root\versions\2" | Should -Not -Exist
+    }
+
+    It 'refuses an archive file whose hash does not match the manifest' {
+        Publish-TestRelease 2 -Tamper 'Open.ps1'
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tpackage`tOpen.ps1 does not match the manifest"
+        (Get-Content "$Root\current" -Raw).Trim() | Should -Be '1'
+    }
+
+    It 'upgrades, keeping the previous version and pointing Watch at the new one' {
+        Publish-TestRelease 2
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 0
+        (Get-Content "$Root\current" -Raw).Trim() | Should -Be '2'
+        "$Root\versions\1" | Should -Exist
+        (Get-ScheduledTask PosTunnel-Watch).Actions[0].Arguments | Should -BeLike "*$Root\versions\2\Watch.ps1*"
+        Get-Field posTunnelVersion | Should -Be '2'
+
+        Publish-TestRelease 3
+        (Invoke-Install).ExitCode | Should -Be 0
+        "$Root\versions\1" | Should -Not -Exist
+        "$Root\versions\2" | Should -Exist
+    }
+
+    It 'refuses an older release than the installed one' {
+        Publish-TestRelease 2
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tpackage`trelease 2 is older than installed 3"
+        (Get-Content "$Root\current" -Raw).Trim() | Should -Be '3'
+    }
+
+    It 'repairs an installed file that no longer matches the manifest' {
+        Add-Content "$Root\versions\3\Touch.ps1" '# drift'
+        Publish-TestRelease 3
+
+        $r = Invoke-Install
+
+        $r.ExitCode | Should -Be 0
+        $r.Text | Should -Match "CHANGED`tpackage`tversion 3 repaired"
+        Get-Content "$Root\versions\3\Touch.ps1" | Should -Not -Contain '# drift'
+    }
+}
