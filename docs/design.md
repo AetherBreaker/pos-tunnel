@@ -625,13 +625,16 @@ once a writer has come and gone, so the daemon opens it read-write; Debian's
 port (the relay's integration tests); on `windows-latest` (Windows Server 2025, PowerShell 5.1), the POS
 package's integration tests: removing Windows' OpenSSH Server capability (no restart needed there),
 installing the Win32-OpenSSH 10.0 MSI over it, a session's whole path through a stand-in relay, and
-`ssh-keygen -A` regenerating the server key pair (`rekey`). Still open:
+`ssh-keygen -A` regenerating the server key pair (`rekey`); on a fleet POS, a library script run from
+the NinjaOne console: in 64-bit PowerShell 5.1, the agent runs
+`powershell.exe -ExecutionPolicy Bypass -NonInteractive -File <script> <parameter string>`, so named
+parameters bind (`-Action Open` bound,
+the rest arriving as `-Name value` pairs for `Invoke-PosTunnel` to re-splat). Every POS runs Windows 11,
+whose bundled OpenSSH (8.6 or later) has `ssh-keygen -Y`, so `Install-PosTunnel` can verify a release
+on a fresh POS. Still open:
 
-- NinjaOne's parameter string: whether named parameters (`-Port 20001`) work or only positional
-  ones (its documentation shows positional only).
-- `ssh-keygen -Y verify` with the `ssh-keygen` Windows bundles, on the oldest Windows build in the
-  fleet: `Install-PosTunnel` uses it on a fresh POS, before `Setup` has installed Win32-OpenSSH.
-  OpenSSH before 8.1 lacks `-Y`.
+- The same parameter string sent through the API's script run rather than the console (`posctl`'s
+  path).
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 
