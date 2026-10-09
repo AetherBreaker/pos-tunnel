@@ -263,7 +263,16 @@ Describe 'Watch' {
     }
 
     It 'skips its run while another PosTunnel script holds the lock' {
-        $lock = [IO.File]::Open("$Root\lock", 'OpenOrCreate', 'ReadWrite', 'None')
+        # The real PosTunnel-Watch may hold it at this moment; wait, as Enter-Lock does.
+        $lock = $null
+        $deadline = (Get-Date).AddSeconds(90)
+        while (-not $lock) {
+            try { $lock = [IO.File]::Open("$Root\lock", 'OpenOrCreate', 'ReadWrite', 'None') }
+            catch [IO.IOException] {
+                if ((Get-Date) -gt $deadline) { throw }
+                Start-Sleep -Milliseconds 500
+            }
+        }
         try { $r = Invoke-Watch } finally { $lock.Dispose() }
 
         $r.ExitCode | Should -Be 0
