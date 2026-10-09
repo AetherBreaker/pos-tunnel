@@ -1764,7 +1764,7 @@ Describe 'Rekey' {
 }
 ```
 
-- [ ] **Step 2: Commit, push, and watch them fail**
+- [x] **Step 2: Commit, push, and watch them fail**
 
 Run the local check (expected: no output), then:
 
@@ -1778,7 +1778,7 @@ git push
 
 Run the CI check. Expected: `pos-integration: failure`, the first 23 tests `[+]`, both of this task's `[-]` (the placeholder throws `not implemented yet`).
 
-- [ ] **Step 3: Write `Rekey.ps1`**
+- [x] **Step 3: Write `Rekey.ps1`**
 
 `pos/package/Rekey.ps1` (replacing the placeholder):
 
