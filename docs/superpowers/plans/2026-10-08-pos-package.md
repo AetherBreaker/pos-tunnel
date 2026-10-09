@@ -1701,7 +1701,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 4: Commit, push, and watch them pass**
+- [x] **Step 4: Commit, push, and watch them pass**
 
 Run the local check (expected: no output), then:
 
@@ -1732,7 +1732,7 @@ Run the CI check. Expected: `pos-integration: success`, `Tests Passed: 23`.
 - Consumes: `Common.ps1` (`Enter-Lock`, `Exit-Lock`, `Write-Result`, `Publish-DeviceFields`, `$RelayKey`, `$SshDir`, `$OpenSsh`, `$SessionFile`).
 - Produces: `Invoke-PosTunnel -Action Rekey`, which `posctl rekey` (its own plan) calls.
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 Append to `tests/pos/PosTunnel.Tests.ps1`:
 

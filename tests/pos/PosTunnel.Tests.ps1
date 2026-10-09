@@ -298,3 +298,29 @@ Describe 'Watch' {
         (Invoke-Watch).Text | Should -BeNullOrEmpty
     }
 }
+
+Describe 'Rekey' {
+    It 'refuses while a session is open' {
+        (Open-TestSession).ExitCode | Should -Be 0
+
+        $r = Invoke-Action Rekey
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tsession`ta session is open"
+        (Invoke-Action Close).ExitCode | Should -Be 0
+    }
+
+    It 'regenerates both key pairs, and a session works with the new ones' {
+        $oldRelayKey, $oldServerKey = (Get-Field posTunnelRelayKey), (Get-Field posTunnelHostKey)
+
+        $r = Invoke-Action Rekey
+
+        $r.ExitCode | Should -Be 0
+        Get-Field posTunnelRelayKey | Should -Not -Be $oldRelayKey
+        Get-Field posTunnelHostKey | Should -Not -Be $oldServerKey
+        (Open-TestSession).ExitCode | Should -Be 0
+        Wait-Port $TunnelPort | Should -BeTrue
+        (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
+        (Invoke-Action Close).ExitCode | Should -Be 0
+    }
+}
