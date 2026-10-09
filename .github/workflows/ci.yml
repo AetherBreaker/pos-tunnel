@@ -73,8 +73,9 @@ jobs:
           submodules: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: astral-sh/setup-uv@v5
-      # --no-project: the dev group comes from the private index, which CI can't reach.
-      - name: uv run --no-project pytest tests/cli
+      # --no-project: the dev group comes from the private index, which CI can't reach. It also skips
+      # requires-python, so pin 3.14, whose lazy annotations the tests' TYPE_CHECKING imports need.
+      - name: uv run --no-project --python 3.14 pytest tests/cli
         env:
           POS_TUNNEL_DOCKER: "1"
-        run: uv run --no-project --with pytest --with pytest-cov --with pytest-asyncio pytest tests/cli
+        run: uv run --no-project --python 3.14 --with pytest --with pytest-cov --with pytest-asyncio pytest tests/cli
