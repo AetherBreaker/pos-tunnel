@@ -105,6 +105,17 @@ try {
         $null = New-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value $PowerShellExe -PropertyType String -Force
         Write-Result 'CHANGED' $step 'DefaultShell'
     }
+    # The MSI has the service restart sshd at once whenever it exits: a start without Start-Sshd's loopback
+    # check, and a crash loop that a Stop-Service between crash and restart doesn't end (sshd failing to
+    # bind, say). During a session Watch restarts it instead. sc.exe output may be localized, so compare
+    # the setting itself.
+    $service = 'HKLM:\SYSTEM\CurrentControlSet\Services\sshd'
+    $before = "$((Get-ItemProperty -LiteralPath $service -Name FailureActions -ErrorAction SilentlyContinue).FailureActions)"
+    $null = & sc.exe failure sshd reset= 0 actions= '""'
+    if ($LASTEXITCODE) { throw "sc.exe failure exited $LASTEXITCODE" }
+    if ("$((Get-ItemProperty -LiteralPath $service -Name FailureActions -ErrorAction SilentlyContinue).FailureActions)" -ne $before) {
+        Write-Result 'CHANGED' $step 'no restart on failure'
+    }
     Write-Result 'OK' $step
 
     # 4. Key auth uses an S4U logon, so the password is never needed; it is random and discarded.

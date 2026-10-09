@@ -362,7 +362,9 @@ keep healthy.
    outside a session, and `Watch` stops it. Our scripts call `C:\Program Files\OpenSSH\` binaries by
    full path, never the older copies in `System32`.
 3. Registry `DefaultShell` = Windows PowerShell; `ssh-keygen -A` if the MSI's first start of `sshd` left
-   no server key pair.
+   no server key pair. Clear the service's failure actions: the MSI restarts `sshd` at once whenever it
+   exits, which skips the loopback check and, when `sshd` can't bind, crash-loops faster than a
+   `Stop-Service` can reliably land. During a session `Watch` restarts it instead.
 4. Create local admin `support` with a random discarded password, disabled. (Key auth uses an S4U
    logon, so the password is never needed.)
 5. Generate the relay key pair if absent (`Install-PosTunnel` step 1 has already secured the folder).

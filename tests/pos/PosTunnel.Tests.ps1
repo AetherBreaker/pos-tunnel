@@ -39,6 +39,7 @@ Describe 'Install-PosTunnel' {
         (Get-LocalGroupMember -SID 'S-1-5-32-544').Name | Should -Contain "$env:COMPUTERNAME\support"
         Get-Content "$env:ProgramData\ssh\sshd_config" | Should -Contain 'ListenAddress 127.0.0.1'
         (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH').DefaultShell | Should -BeLike '*\WindowsPowerShell\v1.0\powershell.exe'
+        (sc.exe qfailure sshd) -join ' ' | Should -Not -Match 'RESTART'
         Get-Field posTunnelRelayKey | Should -Match '^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
         Get-Field posTunnelHostKey | Should -Match '^ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
         Get-Field posTunnelVersion | Should -Be '1'
@@ -286,22 +287,7 @@ Describe 'Watch' {
         $blocker = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 22)
         $blocker.ExclusiveAddressUse = $true
         $blocker.Start()
-        $t0 = Get-Date
-        Write-Host "DIAG t0 $($t0.ToString('HH:mm:ss.fff'))"
-        try {
-            $r = Invoke-Watch
-            Write-Host "DIAG $(Get-Date -f HH:mm:ss.fff) before release: $((Get-Service sshd).Status)"
-            sc.exe qfailure sshd | ForEach-Object { Write-Host "DIAG $_" }
-            Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG listen $($_.LocalAddress) pid $($_.OwningProcess)" }
-            Get-Process sshd -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG sshd pid $($_.Id) started $($_.StartTime.ToString('HH:mm:ss.fff'))" }
-        } finally { $blocker.Stop() }
-        Start-Sleep -Seconds 3
-        Write-Host "DIAG $(Get-Date -f HH:mm:ss.fff) after release: $((Get-Service sshd).Status)"
-        Get-Process sshd -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG sshd pid $($_.Id) started $($_.StartTime.ToString('HH:mm:ss.fff'))" }
-        Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $t0.AddSeconds(-5) } -ErrorAction SilentlyContinue | Sort-Object TimeCreated |
-            ForEach-Object { Write-Host "DIAG event $($_.TimeCreated.ToString('HH:mm:ss.fff')) $($_.ProviderName) $($_.Id) $($_.Message)" }
-        Get-WinEvent -FilterHashtable @{ LogName = 'OpenSSH/Operational'; StartTime = $t0.AddSeconds(-5) } -ErrorAction SilentlyContinue | Sort-Object TimeCreated |
-            ForEach-Object { Write-Host "DIAG ssh $($_.TimeCreated.ToString('HH:mm:ss.fff')) $($_.LevelDisplayName) $($_.Message)" }
+        try { $r = Invoke-Watch } finally { $blocker.Stop() }
 
         $r.ExitCode | Should -Be 1
         $r.Text | Should -Match "FAILED`tsshd`t"
