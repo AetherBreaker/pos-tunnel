@@ -2105,7 +2105,7 @@ POS_TUNNEL_SIGNING_KEY=<path to the release signing private key> uv run poe sign
 
 Expected: `signed pos package version 2; commit pos/manifest.json and its .sig`. Wait for the user to confirm before continuing.
 
-- [ ] **Step 5: Verify the signature and commit**
+- [x] **Step 5: Verify the signature and commit**
 
 ```bash
 uv run --no-project scripts/sign_pos.py --check && echo signature ok
