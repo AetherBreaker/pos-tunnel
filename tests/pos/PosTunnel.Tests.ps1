@@ -229,6 +229,21 @@ Describe 'Sessions: Invoke-PosTunnel, Open, Touch, Close' {
         (Get-IdleState).Session | Should -BeFalse
         (Get-IdleState).SshdStatus | Should -Be 'Stopped'
     }
+
+    It 'tears down when Open fails after starting the session' {
+        Set-Content "$Root\relay.json" 'not json' -Encoding ASCII
+
+        $r = Open-TestSession
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`ttunnel`t"
+        $state = Get-IdleState
+        $state.Session | Should -BeFalse
+        $state.SupportEnabled | Should -BeFalse
+        $state.SshdStatus | Should -Be 'Stopped'
+        $state.AuthorizedKeys | Should -Be 0
+        (Invoke-Install).ExitCode | Should -Be 0
+    }
 }
 
 Describe 'Watch' {
@@ -247,13 +262,39 @@ Describe 'Watch' {
     }
 
     It 'skips its run while another PosTunnel script holds the lock' {
-        $mutex = New-Object Threading.Mutex($false, 'Global\PosTunnel')
-        $null = $mutex.WaitOne()
-        try { $r = Invoke-Watch } finally { $mutex.ReleaseMutex() }
+        $lock = [IO.File]::Open("$Root\lock", 'OpenOrCreate', 'ReadWrite', 'None')
+        try { $r = Invoke-Watch } finally { $lock.Dispose() }
 
         $r.ExitCode | Should -Be 0
         $r.Text | Should -Match "SKIPPED`tlock"
         (Get-IdleState).Session | Should -BeTrue
+    }
+
+    # Any user can create and hold a named mutex, so the lock must not be one.
+    It 'is not held up by a Global\PosTunnel mutex another process holds' {
+        $mutex = New-Object Threading.Mutex($false, 'Global\PosTunnel')
+        $null = $mutex.WaitOne()
+        try { $r = Invoke-Watch } finally { $mutex.ReleaseMutex(); $mutex.Dispose() }
+
+        $r.ExitCode | Should -Be 0
+        $r.Text | Should -Not -Match 'SKIPPED'
+    }
+
+    # As on a slow boot: sshd doesn't listen, here because something else holds 127.0.0.1:22.
+    It 'keeps the session when sshd does not come up, stopped, and starts it on the next run' {
+        Stop-Service sshd -Force
+        $blocker = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 22)
+        $blocker.ExclusiveAddressUse = $true
+        $blocker.Start()
+        try { $r = Invoke-Watch } finally { $blocker.Stop() }
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tsshd`t"
+        (Get-IdleState).Session | Should -BeTrue
+        (Get-IdleState).SshdStatus | Should -Be 'Stopped'
+
+        (Invoke-Watch).ExitCode | Should -Be 0
+        (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
     }
 
     It 'tears down when the lease expires, ending the live connection' {
