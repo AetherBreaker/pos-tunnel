@@ -1819,7 +1819,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 4: Commit, push, and watch them pass**
+- [x] **Step 4: Commit, push, and watch them pass**
 
 Run the local check (expected: no output), then:
 
@@ -2095,7 +2095,7 @@ and what CI verified on Windows Server 2025.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 4: Ask the user to re-sign the package**
+- [x] **Step 4: Ask the user to re-sign the package**
 
 Stop and ask the user to run, from the repo root on their workstation (the release signing private key never leaves it, and an agent never signs with it):
 
