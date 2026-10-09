@@ -1627,7 +1627,7 @@ Describe 'Watch' {
 }
 ```
 
-- [ ] **Step 2: Commit, push, and watch them fail**
+- [x] **Step 2: Commit, push, and watch them fail**
 
 Run the local check (expected: no output), then:
 
@@ -1641,7 +1641,7 @@ git push
 
 Run the CI check. Expected: `pos-integration: failure`, the first 18 tests `[+]`, this task's 5 `[-]` (the placeholder `Watch.ps1` throws `not implemented yet`).
 
-- [ ] **Step 3: Write `Watch.ps1`**
+- [x] **Step 3: Write `Watch.ps1`**
 
 `pos/package/Watch.ps1` (replacing the placeholder):
 
