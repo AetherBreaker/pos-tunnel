@@ -1521,7 +1521,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 7: Commit, push, and watch them pass**
+- [x] **Step 7: Commit, push, and watch them pass**
 
 Run the local check (expected: no output), then:
 
@@ -1553,7 +1553,7 @@ Run the CI check. Expected: `pos-integration: success`, `Tests Passed: 18`.
 - Consumes: `Common.ps1` (`Enter-Lock`, `Exit-Lock`, `Write-Result`, `Start-Sshd`, `Stop-Session`, `$SessionFile`, `$LeaseFile`, `$MaxSessionHours`, `$SupportUser`, `$LinkTask`); `session.json` and `lease` as Task 3 writes them; the harness's `Invoke-Watch`.
 - Produces: the `PosTunnel-Watch` task's behaviour. From here on it fires for real every 2 minutes during the suite, so a test of what `Watch` does checks the state left behind, not the output of its own run.
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 Append to `tests/pos/PosTunnel.Tests.ps1`:
 

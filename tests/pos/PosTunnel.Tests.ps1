@@ -230,3 +230,71 @@ Describe 'Sessions: Invoke-PosTunnel, Open, Touch, Close' {
         (Get-IdleState).SshdStatus | Should -Be 'Stopped'
     }
 }
+
+Describe 'Watch' {
+    It 'brings sshd and the tunnel back after a restart' {
+        (Open-TestSession).ExitCode | Should -Be 0
+        Wait-Port $TunnelPort | Should -BeTrue
+        Stop-ScheduledTask PosTunnel-Link
+        Stop-Service sshd -Force
+        Wait-Port $TunnelPort -Closed | Should -BeTrue
+
+        $r = Invoke-Watch
+
+        $r.ExitCode | Should -Be 0
+        Wait-Port $TunnelPort | Should -BeTrue
+        (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
+    }
+
+    It 'skips its run while another PosTunnel script holds the lock' {
+        $mutex = New-Object Threading.Mutex($false, 'Global\PosTunnel')
+        $null = $mutex.WaitOne()
+        try { $r = Invoke-Watch } finally { $mutex.ReleaseMutex() }
+
+        $r.ExitCode | Should -Be 0
+        $r.Text | Should -Match "SKIPPED`tlock"
+        (Get-IdleState).Session | Should -BeTrue
+    }
+
+    It 'tears down when the lease expires, ending the live connection' {
+        $live = Start-TunnelSsh 'Start-Sleep 600'
+        (Get-Item "$Root\lease").LastWriteTimeUtc = [DateTime]::UtcNow.AddHours(-2)
+
+        $r = Invoke-Watch
+
+        $r.ExitCode | Should -Be 0
+        $live.WaitForExit(30000) | Should -BeTrue
+        $state = Get-IdleState
+        $state.SshdStatus | Should -Be 'Stopped'
+        $state.SupportEnabled | Should -BeFalse
+        $state.AuthorizedKeys | Should -Be 0
+        $state.LinkState | Should -Be 'Disabled'
+        $state.Session | Should -BeFalse
+        Wait-Port $TunnelPort -Closed | Should -BeTrue
+    }
+
+    It 'tears down at the 72-hour maximum however fresh the lease' {
+        (Open-TestSession).ExitCode | Should -Be 0
+        $session = Get-Content "$Root\session.json" -Raw | ConvertFrom-Json
+        $session.started = [DateTimeOffset]::UtcNow.AddHours(-73).ToUnixTimeSeconds()
+        Set-Content "$Root\session.json" ($session | ConvertTo-Json -Compress) -Encoding ASCII
+
+        $r = Invoke-Watch
+
+        $r.ExitCode | Should -Be 0
+        (Get-IdleState).Session | Should -BeFalse
+        (Get-IdleState).SshdStatus | Should -Be 'Stopped'
+    }
+
+    It 'stops sshd again when an OpenSSH upgrade restarts it between sessions' {
+        Set-Service sshd -StartupType Automatic
+        Start-Service sshd
+
+        $r = Invoke-Watch
+
+        $r.ExitCode | Should -Be 0
+        (Get-IdleState).SshdStatus | Should -Be 'Stopped'
+        (Get-IdleState).SshdStartType | Should -Be 'Manual'
+        (Invoke-Watch).Text | Should -BeNullOrEmpty
+    }
+}
