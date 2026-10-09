@@ -1318,7 +1318,7 @@ Describe 'Sessions: Invoke-PosTunnel, Open, Touch, Close' {
 }
 ```
 
-- [ ] **Step 2: Commit, push, and watch them fail**
+- [x] **Step 2: Commit, push, and watch them fail**
 
 Run the local check (expected: no output), then:
 
@@ -1332,7 +1332,7 @@ git push
 
 Run the CI check. Expected: `pos-integration: failure`, Tasks 1-2's 9 tests `[+]`, this task's 9 `[-]` (the placeholder `Invoke-PosTunnel` throws `not implemented yet`).
 
-- [ ] **Step 3: Write `Invoke-PosTunnel.ps1`**
+- [x] **Step 3: Write `Invoke-PosTunnel.ps1`**
 
 `pos/ninja/Invoke-PosTunnel.ps1` (replacing the placeholder):
 
@@ -1388,7 +1388,7 @@ try {
 }
 ```
 
-- [ ] **Step 4: Write `Open.ps1`**
+- [x] **Step 4: Write `Open.ps1`**
 
 `pos/package/Open.ps1` (replacing the placeholder):
 
@@ -1469,7 +1469,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 5: Write `Touch.ps1`**
+- [x] **Step 5: Write `Touch.ps1`**
 
 `pos/package/Touch.ps1` (replacing the placeholder):
 
@@ -1495,7 +1495,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 6: Write `Close.ps1`**
+- [x] **Step 6: Write `Close.ps1`**
 
 `pos/package/Close.ps1` (replacing the placeholder):
 
