@@ -93,3 +93,31 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod openssh {
+    use super::*;
+
+    /// OpenSSH's `ssh-keygen` (which `poe sign-pos` signs with) reads an encrypted key this crate wrote.
+    #[test]
+    fn ssh_keygen_reads_an_encrypted_key() {
+        let dir = std::env::temp_dir().join(format!("posctl-openssh-{}", std::process::id()));
+        let key = generate("test").unwrap();
+        write_private_key(&dir.join("k"), &key, Some("correct horse")).unwrap();
+        let out = std::process::Command::new("ssh-keygen")
+            .args(["-y", "-P", "correct horse", "-f"])
+            .arg(dir.join("k"))
+            .output()
+            .unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            parse_public(&String::from_utf8(out.stdout).unwrap()).unwrap(),
+            public_line(key.public_key()).unwrap()
+        );
+    }
+}

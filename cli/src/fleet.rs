@@ -2,10 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::ninja::{Api, Device};
+use crate::ninja::{Api, Device, FieldDefinition};
 
 pub struct Field {
     pub name: &'static str,
@@ -67,43 +67,67 @@ impl Field {
             ]
         }
     }
-}
 
-/// Reads all six definitions, refuses if an existing one differs from its settings (naming the field
-/// and setting), then creates the missing ones. It never changes an existing definition, since a changed
-/// setting may be tampering; refusing before creating leaves the tenant as it was.
-pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
-    let mut missing = Vec::new();
-    for field in &FIELDS {
-        let Some(found) = api.field_definition(field.name)? else {
-            missing.push(field);
-            continue;
-        };
+    /// The first setting `found` has that differs from this field's, as "<setting> is <got>, expected <want>".
+    fn mismatch(&self, found: FieldDefinition) -> Option<String> {
         let actual = [
             found.definition_scope.join(","),
             found.script_permission.unwrap_or_default(),
             found.api_permission.unwrap_or_default(),
         ];
-        for ((setting, want), got) in field.settings().into_iter().zip(actual) {
-            if got != want {
-                bail!(
-                    "custom field {}: {setting} is {got}, expected {want}; fix it in NinjaOne or find out who changed it",
-                    field.name
-                );
+        self.settings()
+            .into_iter()
+            .zip(actual)
+            .find(|((_, want), got)| got != want)
+            .map(|((setting, want), got)| format!("{setting} is {got}, expected {want}"))
+    }
+}
+
+/// Reads all six definitions, refuses if an existing one differs from its settings (naming the field
+/// and setting), then creates the missing ones and reads each back. It never changes an existing
+/// definition, since a changed setting may be tampering; refusing before creating leaves the tenant as it
+/// was.
+pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
+    let mut missing = Vec::new();
+    for field in &FIELDS {
+        match api.field_definition(field.name)? {
+            None => missing.push(field),
+            Some(found) => {
+                if let Some(mismatch) = field.mismatch(found) {
+                    bail!(
+                        "custom field {}: {mismatch}; fix it in NinjaOne or find out who changed it",
+                        field.name
+                    );
+                }
             }
         }
     }
     for field in &missing {
         let [(_, scope), (_, script), (_, api_permission)] = field.settings();
+        // `scope` is deprecated in favour of `definitionScope`, but NinjaOne refuses a create without it;
+        // NODE_GLOBAL makes a global field (design section 3), as opposed to a role field.
         api.create_field(&json!({
             "fieldName": field.name,
             "label": field.label,
             "type": "TEXT",
+            "scope": "NODE_GLOBAL",
             "definitionScope": [scope],
             "scriptPermission": script,
             "apiPermission": api_permission,
             "technicianPermission": "READ_ONLY",
         }))?;
+        let stored = api.field_definition(field.name)?.with_context(|| {
+            format!(
+                "NinjaOne accepted custom field {} but doesn't return it",
+                field.name
+            )
+        })?;
+        if let Some(mismatch) = field.mismatch(stored) {
+            bail!(
+                "NinjaOne created custom field {} with {mismatch}; delete it in NinjaOne before trying again",
+                field.name
+            );
+        }
     }
     Ok(missing.iter().map(|field| field.name).collect())
 }
@@ -210,16 +234,37 @@ mod tests {
         ])
     }
 
+    /// A fake whose custom-field store keeps what is created, passed through `stored` (what NinjaOne
+    /// keeps of a create request).
+    fn field_store(stored: fn(Value) -> Value) -> Fake {
+        let fields = std::sync::Mutex::new(std::collections::HashMap::new());
+        Fake::start(move |method, path, body| {
+            let mut fields = fields.lock().unwrap();
+            match (method, path.strip_prefix("/v2/custom-fields/field-name/")) {
+                ("GET", Some(name)) => match fields.get(name) {
+                    Some(field) => (200, Value::clone(field)),
+                    None => (404, json!({"resultCode": "not found"})),
+                },
+                ("POST", None) => {
+                    let name = body["fieldName"].as_str().unwrap().to_owned();
+                    let mut field = stored(body.clone());
+                    field["name"] = json!(name);
+                    fields.insert(name, field);
+                    (201, json!({}))
+                }
+                _ => (404, json!({})),
+            }
+        })
+    }
+
     #[test]
     fn ensure_fields_creates_every_missing_field_with_its_settings() {
-        let fake = Fake::start(|method, _, _| match method {
-            "GET" => (404, json!({"resultCode": "not found"})),
-            _ => (201, json!({})),
-        });
+        let fake = field_store(|request| request);
         let created = ensure_fields(&Api::with_token(&fake.url, "t")).unwrap();
         assert_eq!(created.len(), 6);
         let posts = fake.requests_to("POST", "/v2/custom-fields");
         assert_eq!(posts[0]["fieldName"], "posTunnelRelayKey");
+        assert_eq!(posts[0]["scope"], "NODE_GLOBAL");
         assert_eq!(posts[0]["definitionScope"], json!(["NODE"]));
         assert_eq!(posts[0]["scriptPermission"], "READ_WRITE");
         assert_eq!(posts[0]["apiPermission"], "READ_ONLY");
@@ -227,6 +272,27 @@ mod tests {
         assert_eq!(posts[5]["definitionScope"], json!(["ORGANIZATION"]));
         assert_eq!(posts[5]["scriptPermission"], "READ_ONLY");
         assert_eq!(posts[5]["apiPermission"], "READ_WRITE");
+        // Run again: everything exists and matches, so nothing more is created.
+        assert!(
+            ensure_fields(&Api::with_token(&fake.url, "t"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ensure_fields_refuses_a_field_ninjaone_stored_differently() {
+        let fake = field_store(|mut request| {
+            request["scriptPermission"] = json!("READ_WRITE");
+            request
+        });
+        let error = ensure_fields(&Api::with_token(&fake.url, "t"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("NinjaOne created custom field posTunnelRelay with script permission is READ_WRITE, expected READ_ONLY"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -250,10 +316,21 @@ mod tests {
 
     #[test]
     fn fleet_fields_go_to_each_organization_holding_a_pos_once() {
-        let fake = Fake::start(|method, path, _| match (method, path) {
-            ("GET", "/v2/devices?pageSize=1000") => (200, devices()),
-            ("GET", _) => (404, json!({})),
-            _ => (204, Value::Null),
+        // Every field already exists as it should.
+        let fake = Fake::start(|method, path, _| {
+            let field = path.strip_prefix("/v2/custom-fields/field-name/");
+            match (
+                method,
+                field.and_then(|name| FIELDS.iter().find(|f| f.name == name)),
+            ) {
+                ("GET", Some(field)) => {
+                    let [(_, scope), (_, script), (_, api)] = field.settings();
+                    let definition = json!({"name": field.name, "definitionScope": [scope], "scriptPermission": script, "apiPermission": api});
+                    (200, definition)
+                }
+                ("GET", None) => (200, devices()),
+                _ => (204, Value::Null),
+            }
         });
         let values = json!({"posTunnelSigner": "ssh-ed25519 AAAA"});
         let organizations = set_fleet_fields(&Api::with_token(&fake.url, "t"), 7, &values).unwrap();
