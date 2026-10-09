@@ -62,7 +62,13 @@ enum RelayCommand {
     },
     /// Point the fleet at the relay: write the fleet relay fields, then run `Install-PosTunnel -Force` on
     /// every online POS at once. Open sessions end.
-    Point,
+    Point {
+        /// Run `Install-PosTunnel -Force` on this one POS only (its exact display name), to try a relay
+        /// on a test device first. The fleet fields are written either way; other POSes pick them up at
+        /// their next scheduled install.
+        #[arg(long, value_name = "DISPLAY_NAME")]
+        device: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -77,15 +83,32 @@ enum SigningCommand {
 #[derive(Subcommand)]
 enum OperatorCommand {
     /// Generate an operator key pair and print the bundle for their `posctl operator import`.
-    Add { name: String },
-    Remove { name: String },
+    Add {
+        name: String,
+    },
+    Remove {
+        name: String,
+    },
     List,
 }
 
 fn main() -> Result<()> {
     let command = Cli::parse().command;
-    if let Command::Init { base_url, client_id, policy, operator_key, name } = command {
-        return init(base_url.trim_end_matches('/'), &client_id, &policy, &operator_key, &name);
+    if let Command::Init {
+        base_url,
+        client_id,
+        policy,
+        operator_key,
+        name,
+    } = command
+    {
+        return init(
+            base_url.trim_end_matches('/'),
+            &client_id,
+            &policy,
+            &operator_key,
+            &name,
+        );
     }
     let mut config = Config::load()?;
     admin::require_admin(&config.operator_key)?;
@@ -96,30 +119,75 @@ fn main() -> Result<()> {
             let key = keys::generate("pos-tunnel relay")?;
             let text = keys::private_text(&key, None)?;
             keys::write_private_key(&admin::relay_key_path()?, &key, None)?;
-            config.relay = Some(Relay { host, port, public_key: keys::public_line(key.public_key())? });
+            config.relay = Some(Relay {
+                host,
+                port,
+                public_key: keys::public_line(key.public_key())?,
+            });
             config.save()?;
             println!("{}", admin::relay_env_line(&text));
-            eprintln!("Paste that line into the relay's environment in Coolify and redeploy, then run `posctl-admin relay point`.");
+            eprintln!(
+                "Paste that line into the relay's environment in Coolify and redeploy, then run `posctl-admin relay point`."
+            );
         }
-        Command::Relay(RelayCommand::Point) => {
-            let relay = config.relay.as_ref().context("no relay yet: run `posctl-admin relay keygen` first")?;
+        Command::Relay(RelayCommand::Point { device }) => {
+            let relay = config
+                .relay
+                .as_ref()
+                .context("no relay yet: run `posctl-admin relay keygen` first")?;
             // From the private key on disk, never asked of the network, where an attacker could answer with theirs.
             let public_key = keys::public_of_file(&admin::relay_key_path()?)?;
             if public_key != relay.public_key {
-                bail!("the posctl config pins a different relay key than {}; run `relay keygen` again", admin::relay_key_path()?.display());
+                bail!(
+                    "the posctl config pins a different relay key than {}; run `relay keygen` again",
+                    admin::relay_key_path()?.display()
+                );
             }
             let ninja = &config.ninjaone;
             let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
+            // Resolved before any write, so a mistyped name changes nothing.
+            let target = device
+                .map(|name| fleet::find_pos(&api, ninja.pos_policy_id, &name))
+                .transpose()?;
+            if let Some(target) = &target
+                && target.offline
+            {
+                bail!(
+                    "{} is offline",
+                    target.display_name.as_deref().unwrap_or_default()
+                );
+            }
             let address = format!("{}:{}", relay.host, relay.port);
             let values = json!({"posTunnelRelay": address, "posTunnelRelayServerKey": public_key});
             let organizations = fleet::set_fleet_fields(&api, ninja.pos_policy_id, &values)?;
             println!("Fleet relay fields written on organizations {organizations:?}.");
-            let (ran, offline) = fleet::run_on_every_pos(&api, ninja.pos_policy_id, ninja.install_script_id, "-Force")?;
-            println!("Install-PosTunnel -Force started on {} POSes.", ran.len());
-            if !offline.is_empty() {
-                println!("Offline, converging at their next daily run: {}", offline.join(", "));
+            match target {
+                Some(target) => {
+                    api.run_script(target.id, ninja.install_script_id, "-Force")?;
+                    println!(
+                        "Install-PosTunnel -Force started on {} only.",
+                        target.display_name.unwrap_or_default()
+                    );
+                }
+                None => {
+                    let (ran, offline) = fleet::run_on_every_pos(
+                        &api,
+                        ninja.pos_policy_id,
+                        ninja.install_script_id,
+                        "-Force",
+                    )?;
+                    println!("Install-PosTunnel -Force started on {} POSes.", ran.len());
+                    if !offline.is_empty() {
+                        println!(
+                            "Offline, converging at their next daily run: {}",
+                            offline.join(", ")
+                        );
+                    }
+                    println!(
+                        "Send the other operators this line:\nposctl relay set {address} {public_key}"
+                    );
+                }
             }
-            println!("Send the other operators this line:\nposctl relay set {address} {public_key}");
         }
         Command::Signing(SigningCommand::Keygen) => {
             if !Path::new(ALLOWED_SIGNERS).exists() {
@@ -133,15 +201,27 @@ fn main() -> Result<()> {
             let path = admin::signing_key_path()?;
             keys::write_private_key(&path, &key, Some(&passphrase))?;
             let public_key = keys::public_line(key.public_key())?;
-            fs::write(ALLOWED_SIGNERS, format!("{SIGNING_NAMESPACE} namespaces=\"{SIGNING_NAMESPACE}\" {public_key}\n"))?;
+            fs::write(
+                ALLOWED_SIGNERS,
+                format!("{SIGNING_NAMESPACE} namespaces=\"{SIGNING_NAMESPACE}\" {public_key}\n"),
+            )?;
             publish_signer(&config.ninjaone, &public_key)?;
             println!("Signing key stored at {}.", path.display());
-            println!("Set POS_TUNNEL_SIGNING_KEY to that path, run `poe sign-pos`, commit {ALLOWED_SIGNERS} and the manifest, and release.");
-            println!("Until that release exists, POSes refuse new releases and keep their installed version.");
+            println!(
+                "Set POS_TUNNEL_SIGNING_KEY to that path, run `poe sign-pos`, commit {ALLOWED_SIGNERS} and the manifest, and release."
+            );
+            println!(
+                "Until that release exists, POSes refuse new releases and keep their installed version."
+            );
         }
         Command::Signing(SigningCommand::Publish) => {
-            let text = fs::read_to_string(ALLOWED_SIGNERS).with_context(|| format!("run this from a checkout of pos-tunnel ({ALLOWED_SIGNERS})"))?;
-            let key = text.split_once("ssh-ed25519").map(|(_, rest)| format!("ssh-ed25519{rest}")).context("no ed25519 key in it")?;
+            let text = fs::read_to_string(ALLOWED_SIGNERS).with_context(|| {
+                format!("run this from a checkout of pos-tunnel ({ALLOWED_SIGNERS})")
+            })?;
+            let key = text
+                .split_once("ssh-ed25519")
+                .map(|(_, rest)| format!("ssh-ed25519{rest}"))
+                .context("no ed25519 key in it")?;
             publish_signer(&config.ninjaone, &keys::parse_public(&key)?)?;
         }
         Command::Operator(command) => operator(command, &config)?,
@@ -149,7 +229,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn init(base_url: &str, client_id: &str, policy: &str, operator_key: &Path, name: &str) -> Result<()> {
+fn init(
+    base_url: &str,
+    client_id: &str,
+    policy: &str,
+    operator_key: &Path,
+    name: &str,
+) -> Result<()> {
     admin::require_admin(operator_key)?;
     admin::check_operator_name(name)?;
     ninja::login(base_url, client_id)?;
@@ -160,7 +246,10 @@ fn init(base_url: &str, client_id: &str, policy: &str, operator_key: &Path, name
         .find(|p| p.name == policy)
         .with_context(|| {
             let names: Vec<&str> = policies.iter().map(|p| p.name.as_str()).collect();
-            format!("no NinjaOne policy named '{policy}'; there are: {}", names.join(", "))
+            format!(
+                "no NinjaOne policy named '{policy}'; there are: {}",
+                names.join(", ")
+            )
         })?
         .id;
     let scripts = api.scripts()?;
@@ -179,17 +268,30 @@ fn init(base_url: &str, client_id: &str, policy: &str, operator_key: &Path, name
         invoke_script_id: script("Invoke-PosTunnel")?,
     };
     let relay = Config::load().ok().and_then(|existing| existing.relay);
-    Config { operator_key: std::path::absolute(operator_key)?, ninjaone, relay }.save()?;
+    Config {
+        operator_key: std::path::absolute(operator_key)?,
+        ninjaone,
+        relay,
+    }
+    .save()?;
     let mut operators = Operators::load()?;
-    operators.operators.insert(name.to_owned(), keys::public_of_file(operator_key)?);
+    operators
+        .operators
+        .insert(name.to_owned(), keys::public_of_file(operator_key)?);
     operators.save()?;
-    println!("posctl is set up for {name}, policy '{policy}' (id {pos_policy_id}). Next: `posctl-admin relay keygen <host>`.");
+    println!(
+        "posctl is set up for {name}, policy '{policy}' (id {pos_policy_id}). Next: `posctl-admin relay keygen <host>`."
+    );
     Ok(())
 }
 
 fn publish_signer(ninja: &NinjaOne, public_key: &str) -> Result<()> {
     let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
-    let organizations = fleet::set_fleet_fields(&api, ninja.pos_policy_id, &json!({"posTunnelSigner": public_key}))?;
+    let organizations = fleet::set_fleet_fields(
+        &api,
+        ninja.pos_policy_id,
+        &json!({"posTunnelSigner": public_key}),
+    )?;
     println!("posTunnelSigner written on organizations {organizations:?}.");
     Ok(())
 }
@@ -203,20 +305,31 @@ fn operator(command: OperatorCommand, config: &Config) -> Result<()> {
                 bail!("there is already an operator named '{name}'");
             }
             if config.relay.is_none() {
-                bail!("no relay yet: run `posctl-admin relay keygen` first, so the bundle carries it");
+                bail!(
+                    "no relay yet: run `posctl-admin relay keygen` first, so the bundle carries it"
+                );
             }
             let key = keys::generate(&name)?;
-            let bundle = Bundle { operator_key: keys::private_text(&key, None)?, config: config.clone() };
-            operators.operators.insert(name.clone(), keys::public_line(key.public_key())?);
+            let bundle = Bundle {
+                operator_key: keys::private_text(&key, None)?,
+                config: config.clone(),
+            };
+            operators
+                .operators
+                .insert(name.clone(), keys::public_line(key.public_key())?);
             operators.save()?;
-            eprintln!("The bundle below holds {name}'s private key and is shown once: send it like a password, never by email or chat.");
+            eprintln!(
+                "The bundle below holds {name}'s private key and is shown once: send it like a password, never by email or chat."
+            );
             println!("{}", bundle.encode()?);
         }
         OperatorCommand::Remove { name } => {
             let admin_key = keys::public_of_file(&config.operator_key)?;
             match operators.operators.get(&name) {
                 None => bail!("no operator named '{name}'"),
-                Some(key) if *key == admin_key => bail!("'{name}' is the admin: removing it would lock you out of the relay"),
+                Some(key) if *key == admin_key => {
+                    bail!("'{name}' is the admin: removing it would lock you out of the relay")
+                }
                 Some(_) => {}
             }
             operators.operators.remove(&name);

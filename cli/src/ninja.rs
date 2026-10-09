@@ -27,7 +27,8 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 pub fn login(base_url: &str, client_id: &str) -> Result<()> {
     let verifier = random_token(48);
     let state = random_token(16);
-    let listener = TcpListener::bind(("127.0.0.1", 0)).context("opening the sign-in callback port")?;
+    let listener =
+        TcpListener::bind(("127.0.0.1", 0)).context("opening the sign-in callback port")?;
     let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
     let url = url::Url::parse_with_params(
         &format!("{base_url}/ws/oauth/authorize"),
@@ -55,7 +56,9 @@ pub fn login(base_url: &str, client_id: &str) -> Result<()> {
             ("code_verifier", &verifier),
         ],
     )?;
-    let refresh = tokens["refresh_token"].as_str().context("NinjaOne returned no refresh token (scope offline_access)")?;
+    let refresh = tokens["refresh_token"]
+        .as_str()
+        .context("NinjaOne returned no refresh token (scope offline_access)")?;
     token_store::save(refresh)
 }
 
@@ -117,13 +120,20 @@ enum Callback {
 /// The request line `GET /?code=..&state=.. HTTP/1.1`. A code with the wrong state is refused: another
 /// page on this machine could otherwise post a code of its choosing to the open port.
 fn parse_callback(request_line: &str, state: &str) -> Callback {
-    let Some(target) = request_line.strip_prefix("GET ").and_then(|rest| rest.split(' ').next()) else {
+    let Some(target) = request_line
+        .strip_prefix("GET ")
+        .and_then(|rest| rest.split(' ').next())
+    else {
         return Callback::Other;
     };
     let Ok(url) = url::Url::parse(&format!("http://127.0.0.1{target}")) else {
         return Callback::Other;
     };
-    let get = |name: &str| url.query_pairs().find(|(k, _)| k == name).map(|(_, v)| v.into_owned());
+    let get = |name: &str| {
+        url.query_pairs()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.into_owned())
+    };
     if let Some(error) = get("error") {
         return Callback::Denied(get("error_description").unwrap_or(error));
     }
@@ -143,11 +153,16 @@ fn agent() -> Agent {
 }
 
 fn token_request<T: DeserializeOwned>(base_url: &str, form: &[(&str, &str)]) -> Result<T> {
-    let mut response = agent().post(format!("{base_url}/ws/oauth/token")).send_form(form.iter().copied())?;
+    let mut response = agent()
+        .post(format!("{base_url}/ws/oauth/token"))
+        .send_form(form.iter().copied())?;
     let status = response.status().as_u16();
     let body = response.body_mut().read_to_string()?;
     if status != 200 {
-        bail!("NinjaOne refused the token request ({status}): {}", snippet(&body));
+        bail!(
+            "NinjaOne refused the token request ({status}): {}",
+            snippet(&body)
+        );
     }
     Ok(serde_json::from_str(&body)?)
 }
@@ -171,7 +186,10 @@ pub mod token_store {
         if let Some(e) = failed {
             return Err(e.into());
         }
-        Ok(keyring_core::Entry::new("posctl", "ninjaone-refresh-token")?)
+        Ok(keyring_core::Entry::new(
+            "posctl",
+            "ninjaone-refresh-token",
+        )?)
     }
 
     #[cfg(windows)]
@@ -181,12 +199,16 @@ pub mod token_store {
 
     #[cfg(windows)]
     pub fn load() -> Result<String> {
-        entry()?.get_password().context("not signed in to NinjaOne: run `posctl login`")
+        entry()?
+            .get_password()
+            .context("not signed in to NinjaOne: run `posctl login`")
     }
 
     #[cfg(not(windows))]
     fn path() -> Result<std::path::PathBuf> {
-        Ok(crate::config::config_home()?.join("posctl").join("refresh_token"))
+        Ok(crate::config::config_home()?
+            .join("posctl")
+            .join("refresh_token"))
     }
 
     #[cfg(not(windows))]
@@ -196,7 +218,10 @@ pub mod token_store {
 
     #[cfg(not(windows))]
     pub fn load() -> Result<String> {
-        Ok(std::fs::read_to_string(path()?).context("not signed in to NinjaOne: run `posctl login`")?.trim().to_owned())
+        Ok(std::fs::read_to_string(path()?)
+            .context("not signed in to NinjaOne: run `posctl login`")?
+            .trim()
+            .to_owned())
     }
 }
 
@@ -245,16 +270,33 @@ pub struct FieldDefinition {
 impl Api {
     pub fn connect(base_url: &str, client_id: &str) -> Result<Api> {
         let refresh = token_store::load()?;
-        let tokens: Value =
-            token_request(base_url, &[("grant_type", "refresh_token"), ("client_id", client_id), ("refresh_token", &refresh)])
-                .context("refreshing the NinjaOne sign-in failed; run `posctl login`")?;
-        let access_token = tokens["access_token"].as_str().context("NinjaOne returned no access token")?.to_owned();
-        Ok(Api { agent: agent(), base_url: base_url.to_owned(), access_token })
+        let tokens: Value = token_request(
+            base_url,
+            &[
+                ("grant_type", "refresh_token"),
+                ("client_id", client_id),
+                ("refresh_token", &refresh),
+            ],
+        )
+        .context("refreshing the NinjaOne sign-in failed; run `posctl login`")?;
+        let access_token = tokens["access_token"]
+            .as_str()
+            .context("NinjaOne returned no access token")?
+            .to_owned();
+        Ok(Api {
+            agent: agent(),
+            base_url: base_url.to_owned(),
+            access_token,
+        })
     }
 
     /// For tests: a client of a fake server with a fixed token.
     pub fn with_token(base_url: &str, access_token: &str) -> Api {
-        Api { agent: agent(), base_url: base_url.to_owned(), access_token: access_token.to_owned() }
+        Api {
+            agent: agent(),
+            base_url: base_url.to_owned(),
+            access_token: access_token.to_owned(),
+        }
     }
 
     /// One call; the status and body, whatever the status.
@@ -263,8 +305,16 @@ impl Api {
         let auth = format!("Bearer {}", self.access_token);
         let mut response = match (method, body) {
             ("GET", _) => self.agent.get(&url).header("Authorization", &auth).call()?,
-            ("POST", Some(body)) => self.agent.post(&url).header("Authorization", &auth).send_json(body)?,
-            ("PATCH", Some(body)) => self.agent.patch(&url).header("Authorization", &auth).send_json(body)?,
+            ("POST", Some(body)) => self
+                .agent
+                .post(&url)
+                .header("Authorization", &auth)
+                .send_json(body)?,
+            ("PATCH", Some(body)) => self
+                .agent
+                .patch(&url)
+                .header("Authorization", &auth)
+                .send_json(body)?,
             _ => bail!("unsupported call {method} {path}"),
         };
         let status = response.status().as_u16();
@@ -274,21 +324,28 @@ impl Api {
     fn checked(&self, method: &str, path: &str, body: Option<&Value>) -> Result<String> {
         let (status, text) = self.call(method, path, body)?;
         if !(200..300).contains(&status) {
-            bail!("NinjaOne {method} {path} failed ({status}): {}", snippet(&text));
+            bail!(
+                "NinjaOne {method} {path} failed ({status}): {}",
+                snippet(&text)
+            );
         }
         Ok(text)
     }
 
     pub fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let text = self.checked("GET", path, None)?;
-        serde_json::from_str(&text).with_context(|| format!("NinjaOne GET {path}: unexpected reply: {}", snippet(&text)))
+        serde_json::from_str(&text)
+            .with_context(|| format!("NinjaOne GET {path}: unexpected reply: {}", snippet(&text)))
     }
 
     /// Every device, a page at a time (`after` is the last device ID of the previous page).
     pub fn devices(&self) -> Result<Vec<Device>> {
         let mut devices: Vec<Device> = Vec::new();
         loop {
-            let after = devices.last().map(|d| format!("&after={}", d.id)).unwrap_or_default();
+            let after = devices
+                .last()
+                .map(|d| format!("&after={}", d.id))
+                .unwrap_or_default();
             let page: Vec<Device> = self.get(&format!("/v2/devices?pageSize=1000{after}"))?;
             let done = page.len() < 1000;
             devices.extend(page);
@@ -317,17 +374,29 @@ impl Api {
     }
 
     pub fn create_field(&self, definition: &Value) -> Result<()> {
-        self.checked("POST", "/v2/custom-fields", Some(definition)).map(drop)
+        self.checked("POST", "/v2/custom-fields", Some(definition))
+            .map(drop)
     }
 
     pub fn set_organization_fields(&self, organization: i64, values: &Value) -> Result<()> {
-        self.checked("PATCH", &format!("/v2/organization/{organization}/custom-fields"), Some(values)).map(drop)
+        self.checked(
+            "PATCH",
+            &format!("/v2/organization/{organization}/custom-fields"),
+            Some(values),
+        )
+        .map(drop)
     }
 
     /// Runs a library script as SYSTEM; `parameters` is the string NinjaOne appends to the command line.
     pub fn run_script(&self, device: i64, script: i64, parameters: &str) -> Result<()> {
-        let body = json!({"type": "SCRIPT", "id": script, "runAs": "system", "parameters": parameters});
-        self.checked("POST", &format!("/v2/device/{device}/script/run"), Some(&body)).map(drop)
+        let body =
+            json!({"type": "SCRIPT", "id": script, "runAs": "system", "parameters": parameters});
+        self.checked(
+            "POST",
+            &format!("/v2/device/{device}/script/run"),
+            Some(&body),
+        )
+        .map(drop)
     }
 }
 
@@ -337,30 +406,58 @@ mod tests {
 
     #[test]
     fn pkce_challenge_matches_rfc_7636_appendix_b() {
-        assert_eq!(pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]
     fn the_callback_yields_its_code_only_with_this_sign_ins_state() {
-        assert_eq!(parse_callback("GET /?code=abc&state=s1 HTTP/1.1\r\n", "s1"), Callback::Code("abc".into()));
-        assert!(matches!(parse_callback("GET /?code=abc&state=other HTTP/1.1\r\n", "s1"), Callback::Denied(_)));
-        assert!(matches!(parse_callback("GET /?code=abc HTTP/1.1\r\n", "s1"), Callback::Denied(_)));
+        assert_eq!(
+            parse_callback("GET /?code=abc&state=s1 HTTP/1.1\r\n", "s1"),
+            Callback::Code("abc".into())
+        );
+        assert!(matches!(
+            parse_callback("GET /?code=abc&state=other HTTP/1.1\r\n", "s1"),
+            Callback::Denied(_)
+        ));
+        assert!(matches!(
+            parse_callback("GET /?code=abc HTTP/1.1\r\n", "s1"),
+            Callback::Denied(_)
+        ));
     }
 
     #[test]
     fn the_callback_reports_a_refusal_and_ignores_other_requests() {
         assert_eq!(
-            parse_callback("GET /?error=access_denied&error_description=user%20said%20no HTTP/1.1", "s"),
+            parse_callback(
+                "GET /?error=access_denied&error_description=user%20said%20no HTTP/1.1",
+                "s"
+            ),
             Callback::Denied("user said no".into())
         );
-        assert_eq!(parse_callback("GET /favicon.ico HTTP/1.1", "s"), Callback::Other);
+        assert_eq!(
+            parse_callback("GET /favicon.ico HTTP/1.1", "s"),
+            Callback::Other
+        );
         assert_eq!(parse_callback("", "s"), Callback::Other);
     }
 
     #[test]
     fn a_device_override_beats_its_role_policy() {
-        let device = |json| serde_json::from_value::<Device>(json).unwrap().effective_policy();
-        assert_eq!(device(json!({"id": 1, "organizationId": 3, "rolePolicyId": 5})), Some(5));
-        assert_eq!(device(json!({"id": 1, "organizationId": 3, "rolePolicyId": 5, "policyId": 9})), Some(9));
+        let device = |json| {
+            serde_json::from_value::<Device>(json)
+                .unwrap()
+                .effective_policy()
+        };
+        assert_eq!(
+            device(json!({"id": 1, "organizationId": 3, "rolePolicyId": 5})),
+            Some(5)
+        );
+        assert_eq!(
+            device(json!({"id": 1, "organizationId": 3, "rolePolicyId": 5, "policyId": 9})),
+            Some(9)
+        );
     }
 }

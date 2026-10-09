@@ -95,14 +95,27 @@ fn main() -> Result<()> {
             let bundle = Bundle::decode(&line)?;
             let key_path = config_home()?.join("posctl").join("operator_key");
             write_private(&key_path, bundle.operator_key.as_bytes())?;
-            Config { operator_key: key_path, ..bundle.config }.save()?;
-            println!("Imported. Next: `posctl login`, and add `Include posctl/config` at the top of ~/.ssh/config.");
+            Config {
+                operator_key: key_path,
+                ..bundle.config
+            }
+            .save()?;
+            println!(
+                "Imported. Next: `posctl login`, and add `Include posctl/config` at the top of ~/.ssh/config."
+            );
         }
-        Command::Relay(RelayCommand::Set { address, public_key }) => {
+        Command::Relay(RelayCommand::Set {
+            address,
+            public_key,
+        }) => {
             let (host, port) = parse_host_port(&address)?;
             let public_key = keys::parse_public(&public_key.join(" "))?;
             let mut config = Config::load()?;
-            config.relay = Some(Relay { host, port, public_key });
+            config.relay = Some(Relay {
+                host,
+                port,
+                public_key,
+            });
             config.save()?;
             println!("posctl now uses the relay at {address}.");
         }

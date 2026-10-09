@@ -16,12 +16,36 @@ pub struct Field {
 }
 
 pub const FIELDS: [Field; 6] = [
-    Field { name: "posTunnelRelayKey", label: "PosTunnel relay public key", fleet: false },
-    Field { name: "posTunnelHostKey", label: "PosTunnel SSH server public key", fleet: false },
-    Field { name: "posTunnelVersion", label: "PosTunnel package version", fleet: false },
-    Field { name: "posTunnelRelay", label: "PosTunnel relay address", fleet: true },
-    Field { name: "posTunnelRelayServerKey", label: "PosTunnel relay server public key", fleet: true },
-    Field { name: "posTunnelSigner", label: "PosTunnel release signing public key", fleet: true },
+    Field {
+        name: "posTunnelRelayKey",
+        label: "PosTunnel relay public key",
+        fleet: false,
+    },
+    Field {
+        name: "posTunnelHostKey",
+        label: "PosTunnel SSH server public key",
+        fleet: false,
+    },
+    Field {
+        name: "posTunnelVersion",
+        label: "PosTunnel package version",
+        fleet: false,
+    },
+    Field {
+        name: "posTunnelRelay",
+        label: "PosTunnel relay address",
+        fleet: true,
+    },
+    Field {
+        name: "posTunnelRelayServerKey",
+        label: "PosTunnel relay server public key",
+        fleet: true,
+    },
+    Field {
+        name: "posTunnelSigner",
+        label: "PosTunnel release signing public key",
+        fleet: true,
+    },
 ];
 
 impl Field {
@@ -30,9 +54,17 @@ impl Field {
     /// to scripts, either of which stops a POS writing it (design section 3).
     fn settings(&self) -> [(&'static str, &'static str); 3] {
         if self.fleet {
-            [("definition scope", "ORGANIZATION"), ("script permission", "READ_ONLY"), ("API permission", "READ_WRITE")]
+            [
+                ("definition scope", "ORGANIZATION"),
+                ("script permission", "READ_ONLY"),
+                ("API permission", "READ_WRITE"),
+            ]
         } else {
-            [("definition scope", "NODE"), ("script permission", "READ_WRITE"), ("API permission", "READ_ONLY")]
+            [
+                ("definition scope", "NODE"),
+                ("script permission", "READ_WRITE"),
+                ("API permission", "READ_ONLY"),
+            ]
         }
     }
 }
@@ -47,10 +79,17 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
             missing.push(field);
             continue;
         };
-        let actual = [found.definition_scope.join(","), found.script_permission.unwrap_or_default(), found.api_permission.unwrap_or_default()];
+        let actual = [
+            found.definition_scope.join(","),
+            found.script_permission.unwrap_or_default(),
+            found.api_permission.unwrap_or_default(),
+        ];
         for ((setting, want), got) in field.settings().into_iter().zip(actual) {
             if got != want {
-                bail!("custom field {}: {setting} is {got}, expected {want}; fix it in NinjaOne or find out who changed it", field.name);
+                bail!(
+                    "custom field {}: {setting} is {got}, expected {want}; fix it in NinjaOne or find out who changed it",
+                    field.name
+                );
             }
         }
     }
@@ -71,16 +110,61 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
 
 /// The POSes: devices whose effective policy is the POS policy (design section 8).
 pub fn pos_devices(api: &Api, pos_policy: i64) -> Result<Vec<Device>> {
-    Ok(api.devices()?.into_iter().filter(|device| device.effective_policy() == Some(pos_policy)).collect())
+    Ok(api
+        .devices()?
+        .into_iter()
+        .filter(|device| device.effective_policy() == Some(pos_policy))
+        .collect())
+}
+
+/// The one POS whose display name is exactly `name` (case-sensitive, design section 4). No match or
+/// several is an error naming what was found.
+pub fn find_pos(api: &Api, pos_policy: i64, name: &str) -> Result<Device> {
+    let poses = pos_devices(api, pos_policy)?;
+    let mut matches: Vec<Device> = poses
+        .iter()
+        .filter(|d| d.display_name.as_deref() == Some(name))
+        .cloned()
+        .collect();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => {
+            let near: Vec<&str> = poses
+                .iter()
+                .filter_map(|d| d.display_name.as_deref())
+                .filter(|n| n.eq_ignore_ascii_case(name))
+                .collect();
+            if near.is_empty() {
+                bail!("no POS is named '{name}' (names are matched exactly, case included)");
+            }
+            bail!(
+                "no POS is named '{name}'; names differ only in case: {}",
+                near.join(", ")
+            );
+        }
+        _ => {
+            let ids: Vec<String> = matches.iter().map(|d| d.id.to_string()).collect();
+            bail!(
+                "{} POSes are named '{name}' (device IDs {}); rename all but one in NinjaOne",
+                matches.len(),
+                ids.join(", ")
+            );
+        }
+    }
 }
 
 /// Writes fleet field values on every organization that holds a POS, after `ensure_fields`. A POS reads
 /// its organization's value (design section 3). Returns those organizations.
 pub fn set_fleet_fields(api: &Api, pos_policy: i64, values: &Value) -> Result<Vec<i64>> {
     ensure_fields(api)?;
-    let organizations: BTreeSet<i64> = pos_devices(api, pos_policy)?.iter().map(|device| device.organization_id).collect();
+    let organizations: BTreeSet<i64> = pos_devices(api, pos_policy)?
+        .iter()
+        .map(|device| device.organization_id)
+        .collect();
     if organizations.is_empty() {
-        bail!("no device has the POS policy, so there is no organization to write the fleet fields on");
+        bail!(
+            "no device has the POS policy, so there is no organization to write the fleet fields on"
+        );
     }
     for &organization in &organizations {
         api.set_organization_fields(organization, values)?;
@@ -90,10 +174,18 @@ pub fn set_fleet_fields(api: &Api, pos_policy: i64, values: &Value) -> Result<Ve
 
 /// Runs `script` with `parameters` on every online POS at once; returns the names it ran on and the
 /// offline ones it skipped, which converge at their next scheduled run.
-pub fn run_on_every_pos(api: &Api, pos_policy: i64, script: i64, parameters: &str) -> Result<(Vec<String>, Vec<String>)> {
+pub fn run_on_every_pos(
+    api: &Api,
+    pos_policy: i64,
+    script: i64,
+    parameters: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
     let (mut ran, mut offline) = (Vec::new(), Vec::new());
     for device in pos_devices(api, pos_policy)? {
-        let name = device.display_name.clone().unwrap_or_else(|| format!("device {}", device.id));
+        let name = device
+            .display_name
+            .clone()
+            .unwrap_or_else(|| format!("device {}", device.id));
         if device.offline {
             offline.push(name);
         } else {
@@ -146,8 +238,13 @@ mod tests {
             ),
             _ => (404, json!({})),
         });
-        let error = ensure_fields(&Api::with_token(&fake.url, "t")).unwrap_err().to_string();
-        assert!(error.contains("posTunnelSigner: script permission is READ_WRITE, expected READ_ONLY"), "{error}");
+        let error = ensure_fields(&Api::with_token(&fake.url, "t"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("posTunnelSigner: script permission is READ_WRITE, expected READ_ONLY"),
+            "{error}"
+        );
         assert!(fake.requests_to("POST", "/v2/custom-fields").is_empty());
     }
 
@@ -161,9 +258,18 @@ mod tests {
         let values = json!({"posTunnelSigner": "ssh-ed25519 AAAA"});
         let organizations = set_fleet_fields(&Api::with_token(&fake.url, "t"), 7, &values).unwrap();
         assert_eq!(organizations, vec![3, 5]);
-        assert_eq!(fake.requests_to("PATCH", "/v2/organization/3/custom-fields"), vec![values.clone()]);
-        assert_eq!(fake.requests_to("PATCH", "/v2/organization/5/custom-fields"), vec![values]);
-        assert!(fake.requests_to("PATCH", "/v2/organization/4/custom-fields").is_empty());
+        assert_eq!(
+            fake.requests_to("PATCH", "/v2/organization/3/custom-fields"),
+            vec![values.clone()]
+        );
+        assert_eq!(
+            fake.requests_to("PATCH", "/v2/organization/5/custom-fields"),
+            vec![values]
+        );
+        assert!(
+            fake.requests_to("PATCH", "/v2/organization/4/custom-fields")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -172,24 +278,71 @@ mod tests {
             "GET" => (200, devices()),
             _ => (204, Value::Null),
         });
-        let (ran, offline) = run_on_every_pos(&Api::with_token(&fake.url, "t"), 7, 93, "-Force").unwrap();
+        let (ran, offline) =
+            run_on_every_pos(&Api::with_token(&fake.url, "t"), 7, 93, "-Force").unwrap();
         assert_eq!(ran, ["POS 000 Test", "POS 900"]);
         assert_eq!(offline, ["POS 001"]);
         let run = json!({"type": "SCRIPT", "id": 93, "runAs": "system", "parameters": "-Force"});
-        assert_eq!(fake.requests_to("POST", "/v2/device/1/script/run"), vec![run.clone()]);
-        assert_eq!(fake.requests_to("POST", "/v2/device/4/script/run"), vec![run]);
+        assert_eq!(
+            fake.requests_to("POST", "/v2/device/1/script/run"),
+            vec![run.clone()]
+        );
+        assert_eq!(
+            fake.requests_to("POST", "/v2/device/4/script/run"),
+            vec![run]
+        );
+    }
+
+    #[test]
+    fn find_pos_matches_one_pos_exactly() {
+        let fake = Fake::start(|_, _, _| {
+            let mut all = devices();
+            let list = all.as_array_mut().unwrap();
+            list.push(
+                json!({"id": 5, "displayName": "POS 001", "organizationId": 3, "rolePolicyId": 7}),
+            );
+            list.push(json!({"id": 6, "displayName": "pos 000 test", "organizationId": 3, "rolePolicyId": 8}));
+            (200, all)
+        });
+        let api = Api::with_token(&fake.url, "t");
+        assert_eq!(find_pos(&api, 7, "POS 000 Test").unwrap().id, 1);
+        assert_eq!(find_pos(&api, 7, "POS 900").unwrap().id, 4);
+        let error = |name| find_pos(&api, 7, name).unwrap_err().to_string();
+        assert!(
+            error("POS 001").contains("device IDs 2, 5"),
+            "{}",
+            error("POS 001")
+        );
+        assert!(
+            error("pos 000 TEST").contains("differ only in case: POS 000 Test"),
+            "{}",
+            error("pos 000 TEST")
+        );
+        // Not a POS: another policy's device by that name doesn't count.
+        assert!(
+            error("Office PC").contains("no POS is named 'Office PC'"),
+            "{}",
+            error("Office PC")
+        );
     }
 
     #[test]
     fn devices_are_read_a_page_at_a_time() {
         let fake = Fake::start(|_, path, _| {
             let page: Vec<Value> = match path {
-                "/v2/devices?pageSize=1000" => (1..=1000).map(|id| json!({"id": id, "organizationId": 3})).collect(),
-                "/v2/devices?pageSize=1000&after=1000" => vec![json!({"id": 1001, "organizationId": 3})],
+                "/v2/devices?pageSize=1000" => (1..=1000)
+                    .map(|id| json!({"id": id, "organizationId": 3}))
+                    .collect(),
+                "/v2/devices?pageSize=1000&after=1000" => {
+                    vec![json!({"id": 1001, "organizationId": 3})]
+                }
                 _ => vec![],
             };
             (200, Value::Array(page))
         });
-        assert_eq!(Api::with_token(&fake.url, "t").devices().unwrap().len(), 1001);
+        assert_eq!(
+            Api::with_token(&fake.url, "t").devices().unwrap().len(),
+            1001
+        );
     }
 }

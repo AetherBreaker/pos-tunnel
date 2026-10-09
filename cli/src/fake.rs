@@ -31,7 +31,10 @@ impl Fake {
                     continue;
                 }
                 let mut words = line.split_whitespace();
-                let (method, path) = (words.next().unwrap_or("").to_owned(), words.next().unwrap_or("").to_owned());
+                let (method, path) = (
+                    words.next().unwrap_or("").to_owned(),
+                    words.next().unwrap_or("").to_owned(),
+                );
                 let mut length = 0;
                 loop {
                     let mut header = String::new();
@@ -50,7 +53,11 @@ impl Fake {
                 let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let (status, reply) = handler(&method, &path, &body);
                 log.lock().unwrap().push((method, path, body));
-                let text = if reply.is_null() { String::new() } else { reply.to_string() };
+                let text = if reply.is_null() {
+                    String::new()
+                } else {
+                    reply.to_string()
+                };
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",
@@ -64,6 +71,10 @@ impl Fake {
     /// The bodies of the requests made with `method` to `path`, in order.
     pub fn requests_to(&self, method: &str, path: &str) -> Vec<Value> {
         let requests = self.requests.lock().unwrap();
-        requests.iter().filter(|(m, p, _)| m == method && p == path).map(|(_, _, body)| body.clone()).collect()
+        requests
+            .iter()
+            .filter(|(m, p, _)| m == method && p == path)
+            .map(|(_, _, body)| body.clone())
+            .collect()
     }
 }

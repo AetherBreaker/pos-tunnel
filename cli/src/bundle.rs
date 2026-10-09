@@ -23,7 +23,9 @@ impl Bundle {
     }
 
     pub fn decode(line: &str) -> Result<Bundle> {
-        let bytes = STANDARD.decode(line.trim()).context("not an operator bundle (bad base64)")?;
+        let bytes = STANDARD
+            .decode(line.trim())
+            .context("not an operator bundle (bad base64)")?;
         toml::from_str(std::str::from_utf8(&bytes)?).context("not an operator bundle")
     }
 }
@@ -36,7 +38,9 @@ mod tests {
     #[test]
     fn a_bundle_round_trips_and_junk_is_refused() {
         let bundle = Bundle {
-            operator_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n".into(),
+            operator_key:
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----\n"
+                    .into(),
             config: Config {
                 operator_key: "unused".into(),
                 ninjaone: NinjaOne {
@@ -46,10 +50,17 @@ mod tests {
                     install_script_id: 93,
                     invoke_script_id: 94,
                 },
-                relay: Some(Relay { host: "relay.example.com".into(), port: 2222, public_key: "ssh-ed25519 AAAA".into() }),
+                relay: Some(Relay {
+                    host: "relay.example.com".into(),
+                    port: 2222,
+                    public_key: "ssh-ed25519 AAAA".into(),
+                }),
             },
         };
-        assert_eq!(Bundle::decode(&format!(" {}\n", bundle.encode().unwrap())).unwrap(), bundle);
+        assert_eq!(
+            Bundle::decode(&format!(" {}\n", bundle.encode().unwrap())).unwrap(),
+            bundle
+        );
         assert!(Bundle::decode("not base64!").is_err());
         assert!(Bundle::decode("aGVsbG8=").is_err());
     }

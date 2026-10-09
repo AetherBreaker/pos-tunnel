@@ -18,12 +18,17 @@ pub fn generate(comment: &str) -> Result<PrivateKey> {
 /// `ssh-ed25519 <base64>` without the comment: the form the fields, the config and `OPERATOR_KEYS` use.
 pub fn public_line(key: &PublicKey) -> Result<String> {
     let text = key.to_openssh()?;
-    Ok(text.split_whitespace().take(2).collect::<Vec<_>>().join(" "))
+    Ok(text
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// An ed25519 public key in OpenSSH's one-line form, comment allowed; returned without it.
 pub fn parse_public(text: &str) -> Result<String> {
-    let key = PublicKey::from_openssh(text.trim()).with_context(|| format!("'{text}' is not an OpenSSH public key"))?;
+    let key = PublicKey::from_openssh(text.trim())
+        .with_context(|| format!("'{text}' is not an OpenSSH public key"))?;
     if key.algorithm() != Algorithm::Ed25519 {
         bail!("'{text}' is not an ed25519 key");
     }
@@ -46,7 +51,8 @@ pub fn write_private_key(path: &Path, key: &PrivateKey, passphrase: Option<&str>
 /// The public half of an OpenSSH private key file, readable even when the file is encrypted.
 pub fn public_of_file(path: &Path) -> Result<String> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let key = PrivateKey::from_openssh(&text).with_context(|| format!("{} is not an OpenSSH private key", path.display()))?;
+    let key = PrivateKey::from_openssh(&text)
+        .with_context(|| format!("{} is not an OpenSSH private key", path.display()))?;
     public_line(key.public_key())
 }
 
@@ -60,7 +66,10 @@ mod tests {
         let key = generate("test").unwrap();
         for (name, passphrase) in [("plain", None), ("encrypted", Some("pw"))] {
             write_private_key(&dir.join(name), &key, passphrase).unwrap();
-            assert_eq!(public_of_file(&dir.join(name)).unwrap(), public_line(key.public_key()).unwrap());
+            assert_eq!(
+                public_of_file(&dir.join(name)).unwrap(),
+                public_line(key.public_key()).unwrap()
+            );
         }
         fs::remove_dir_all(dir).unwrap();
     }
@@ -68,7 +77,10 @@ mod tests {
     #[test]
     fn public_lines_have_no_comment() {
         let line = public_line(generate("a comment").unwrap().public_key()).unwrap();
-        assert!(line.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI"), "{line}");
+        assert!(
+            line.starts_with("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI"),
+            "{line}"
+        );
         assert_eq!(line.split(' ').count(), 2);
         assert_eq!(parse_public(&format!("{line} someone@host")).unwrap(), line);
     }

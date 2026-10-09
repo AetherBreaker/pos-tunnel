@@ -24,7 +24,10 @@ pub const ADMIN_KEY: &str = match option_env!("POSCTL_ADMIN_KEY") {
 /// fleet (design section 7.9).
 pub fn require_admin(operator_key: &Path) -> Result<()> {
     if keys::public_of_file(operator_key)? != keys::parse_public(ADMIN_KEY)? {
-        bail!("posctl-admin is for the admin only: {} is not the admin's operator key", operator_key.display());
+        bail!(
+            "posctl-admin is for the admin only: {} is not the admin's operator key",
+            operator_key.display()
+        );
     }
     Ok(())
 }
@@ -44,7 +47,10 @@ pub fn signing_key_path() -> Result<PathBuf> {
 
 /// The relay's `RELAY_SSH_PRIVATE_KEY` line: base64 of the OpenSSH private key file (design section 6.1).
 pub fn relay_env_line(private_key_text: &str) -> String {
-    format!("RELAY_SSH_PRIVATE_KEY={}", STANDARD.encode(private_key_text))
+    format!(
+        "RELAY_SSH_PRIVATE_KEY={}",
+        STANDARD.encode(private_key_text)
+    )
 }
 
 /// The operators the relay lets in, the admin included: `operators.toml`, name to public key. Only
@@ -62,7 +68,9 @@ impl Operators {
     pub fn load() -> Result<Operators> {
         let path = Operators::path()?;
         match fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).with_context(|| format!("{} is not valid", path.display())),
+            Ok(text) => {
+                toml::from_str(&text).with_context(|| format!("{} is not valid", path.display()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Operators::default()),
             Err(e) => Err(e.into()),
         }
@@ -77,7 +85,12 @@ impl Operators {
         let entries: Vec<String> = self
             .operators
             .iter()
-            .map(|(name, key)| format!("{name}={}", key.split_whitespace().nth(1).unwrap_or_default()))
+            .map(|(name, key)| {
+                format!(
+                    "{name}={}",
+                    key.split_whitespace().nth(1).unwrap_or_default()
+                )
+            })
             .collect();
         format!("OPERATOR_KEYS={}", entries.join(","))
     }
@@ -85,7 +98,11 @@ impl Operators {
 
 /// The relay's operator-name pattern (its `keys.OPERATOR_NAME`).
 pub fn check_operator_name(name: &str) -> Result<()> {
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    {
         bail!("an operator name is letters, digits, '.', '_' and '-' only, got '{name}'");
     }
     Ok(())
@@ -98,14 +115,21 @@ mod tests {
     #[test]
     fn operator_keys_line_lists_name_and_bare_base64() {
         let mut operators = Operators::default();
-        operators.operators.insert("bob".into(), "ssh-ed25519 BBBB".into());
-        operators.operators.insert("alice".into(), "ssh-ed25519 AAAA".into());
+        operators
+            .operators
+            .insert("bob".into(), "ssh-ed25519 BBBB".into());
+        operators
+            .operators
+            .insert("alice".into(), "ssh-ed25519 AAAA".into());
         assert_eq!(operators.env_line(), "OPERATOR_KEYS=alice=AAAA,bob=BBBB");
     }
 
     #[test]
     fn relay_line_is_base64_of_the_key_file() {
-        assert_eq!(relay_env_line("-----BEGIN-----\n"), "RELAY_SSH_PRIVATE_KEY=LS0tLS1CRUdJTi0tLS0tCg==");
+        assert_eq!(
+            relay_env_line("-----BEGIN-----\n"),
+            "RELAY_SSH_PRIVATE_KEY=LS0tLS1CRUdJTi0tLS0tCg=="
+        );
     }
 
     #[test]

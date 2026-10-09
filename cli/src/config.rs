@@ -60,7 +60,8 @@ impl Config {
                 path.display()
             )
         })?;
-        toml::from_str(&text).with_context(|| format!("{} is not a valid posctl config", path.display()))
+        toml::from_str(&text)
+            .with_context(|| format!("{} is not a valid posctl config", path.display()))
     }
 
     pub fn save(&self) -> Result<()> {
@@ -71,11 +72,20 @@ impl Config {
 /// `<host>[:<port>]`, the port defaulting to the relay's.
 pub fn parse_host_port(value: &str) -> Result<(String, u16)> {
     let (host, port) = match value.rsplit_once(':') {
-        Some((host, port)) => (host, port.parse().with_context(|| format!("bad port in '{value}'"))?),
+        Some((host, port)) => (
+            host,
+            port.parse()
+                .with_context(|| format!("bad port in '{value}'"))?,
+        ),
         None => (value, DEFAULT_RELAY_PORT),
     };
     // The same host pattern Install-PosTunnel accepts from the posTunnelRelay field.
-    if host.is_empty() || !host.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') || port == 0 {
+    if host.is_empty()
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        || port == 0
+    {
         bail!("expected <host>[:<port>], got '{value}'");
     }
     Ok((host.to_owned(), port))
@@ -91,7 +101,12 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
         file.write_all(bytes)?;
     }
     #[cfg(not(unix))]
@@ -105,13 +120,27 @@ mod tests {
 
     #[test]
     fn host_port_defaults_to_the_relay_port() {
-        assert_eq!(parse_host_port("relay.example.com").unwrap(), ("relay.example.com".into(), 2222));
-        assert_eq!(parse_host_port("10.0.0.5:2200").unwrap(), ("10.0.0.5".into(), 2200));
+        assert_eq!(
+            parse_host_port("relay.example.com").unwrap(),
+            ("relay.example.com".into(), 2222)
+        );
+        assert_eq!(
+            parse_host_port("10.0.0.5:2200").unwrap(),
+            ("10.0.0.5".into(), 2200)
+        );
     }
 
     #[test]
     fn host_port_refuses_anything_install_would() {
-        for bad in ["", ":2222", "relay:0", "relay:x", "re lay", "relay:70000", "relay/x"] {
+        for bad in [
+            "",
+            ":2222",
+            "relay:0",
+            "relay:x",
+            "re lay",
+            "relay:70000",
+            "relay/x",
+        ] {
             assert!(parse_host_port(bad).is_err(), "{bad}");
         }
     }
@@ -127,8 +156,15 @@ mod tests {
                 install_script_id: 93,
                 invoke_script_id: 94,
             },
-            relay: Some(Relay { host: "relay.example.com".into(), port: 2222, public_key: "ssh-ed25519 AAAA".into() }),
+            relay: Some(Relay {
+                host: "relay.example.com".into(),
+                port: 2222,
+                public_key: "ssh-ed25519 AAAA".into(),
+            }),
         };
-        assert_eq!(toml::from_str::<Config>(&toml::to_string(&config).unwrap()).unwrap(), config);
+        assert_eq!(
+            toml::from_str::<Config>(&toml::to_string(&config).unwrap()).unwrap(),
+            config
+        );
     }
 }
