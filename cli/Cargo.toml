@@ -5,7 +5,33 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "posctl"
+path = "src/bin/posctl.rs"
+
+[[bin]]
+name = "posctl-admin"
+path = "src/bin/posctl-admin.rs"
+
 [dependencies]
 anyhow = "1"
+base64 = "0.23.1"
 clap = { version = "4", features = ["derive"] }
+dirs = "7.0.0"
 humantime = "2"
+keyring-core = "1.0.0"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+ssh-key = { version = "0.6.7", features = ["ed25519", "rand_core", "std", "encryption", "getrandom"], default-features = false }
+toml = "1.1.8"
+ureq = { version = "3.4.2", features = ["json"] }
+url = "2.5.8"
+webbrowser = "1.2.4"
+
+[target."cfg(windows)".dependencies]
+windows-native-keyring-store = "1.1.0"

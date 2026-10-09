@@ -62,3 +62,19 @@ jobs:
         if: failure()
         shell: powershell
         run: Get-WinEvent -LogName OpenSSH/Operational -MaxEvents 300 -ErrorAction SilentlyContinue | Sort-Object TimeCreated | ForEach-Object { "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.Message)" }
+
+  cli-integration:
+    name: "posctl: relay setup integration tests (ubuntu-latest)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+      # --no-project: the dev group comes from the private index, which CI can't reach.
+      - name: uv run --no-project pytest tests/cli
+        env:
+          POS_TUNNEL_DOCKER: "1"
+        run: uv run --no-project --with pytest --with pytest-cov --with pytest-asyncio pytest tests/cli
