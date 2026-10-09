@@ -30,3 +30,35 @@ jobs:
           components: clippy
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  pos-integration:
+    name: "POS package: integration tests as SYSTEM (windows-latest)"
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Every POS script is ASCII and parses in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $bad = 0
+          foreach ($file in Get-ChildItem pos, tests\pos -Recurse -Filter *.ps1) {
+            if ([IO.File]::ReadAllBytes($file.FullName) | Where-Object { $_ -gt 127 }) { "$($file.FullName): not ASCII"; $bad++ }
+            $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
+            foreach ($e in $errors) { "$($file.FullName):$($e.Extent.StartLineNumber): $($e.Message)"; $bad++ }
+          }
+          exit [int]($bad -gt 0)
+
+      - name: tests\pos\Invoke-Tests.ps1
+        shell: powershell
+        env:
+          POS_TUNNEL_DISPOSABLE: "1"
+        run: .\tests\pos\Invoke-Tests.ps1
+
+      - name: Get-WinEvent OpenSSH/Operational (on failure)
+        if: failure()
+        shell: powershell
+        run: Get-WinEvent -LogName OpenSSH/Operational -MaxEvents 300 -ErrorAction SilentlyContinue | Sort-Object TimeCreated | ForEach-Object { "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.Message)" }

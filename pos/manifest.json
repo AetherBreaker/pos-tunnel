@@ -1,10 +1,12 @@
 {
-  "version": 1,
+  "version": 3,
   "files": {
-    "Close.ps1": "c3421347913c4347a49778a8ea4815447826e43dd1dfb0f6f9d12a691e1d5726",
-    "Open.ps1": "2198d92369156967fbb71b9af623b9f20d15c45f8e9692d9d801ec7a3e2e9acd",
-    "Setup.ps1": "ab5841c39a48723473cbfd898e620804921bb5a59eda487c14cbf2ef87e93dc2",
-    "Touch.ps1": "faaa3e874da3a789afd8ac773b7eaf3ff83554cf6bfbe6b2fb98d67119e2b2db",
-    "Watch.ps1": "5c181042aa41120f5fdd84933ce42e30ec7514abab9f686e5f364254f0b16375"
+    "Close.ps1": "1937104330865597b6b2bcac21ba87b9a5f026ca104ca7489265cac6dea8f8f1",
+    "Common.ps1": "d8ac1f33c73b3c5c4054311843a0c67a8284c61df5cd68fdadb8b98c7d1a83a1",
+    "Open.ps1": "1d2f691ce3772238f9a620b7f27a27f2191f938c767ae58beeb86812bca4817a",
+    "Rekey.ps1": "af51de98f412b5b7af1b7d0b5f0c3f50fb2d1139c24769ceabca76cfc3de9061",
+    "Setup.ps1": "0d47f6433e1aa33e64757fe10d8dcc86447864c4729be1d4dfbcff4c5a6336c8",
+    "Touch.ps1": "c15191ff45ced7a0120d9b665bbd1e9059bf45f16e9638742ee1cbcc7a19fc65",
+    "Watch.ps1": "6e76cee7b3c0461b7a302def62cee6ac913ff00f6e2b00f636b881a9a221f4c3"
   }
 }
