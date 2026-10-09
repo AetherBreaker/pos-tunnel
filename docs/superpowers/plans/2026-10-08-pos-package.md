@@ -110,7 +110,7 @@ Each was settled by a probe or a CI run; Task 6 records them in the design.
 - Produces (`Install-PosTunnel.ps1`): `[-Force]`; reads fleet fields `posTunnelSigner`, `posTunnelRelay` (`<host>:<port>`), `posTunnelRelayServerKey`; downloads `pos-manifest.json`, `pos-manifest.json.sig`, `pos-package.zip` from `$ReleaseUrl`; writes `$Root\current`.
 - Produces (harness, for every later task): `Invoke-Install [-Force]`, `Invoke-Action <Action> [string[]]`, `Invoke-Watch`, `Open-TestSession [-IdleSeconds 3600]`, `Invoke-ThroughTunnel <command>` -> `{ExitCode, Output}`, `Start-TunnelSsh <command>` -> `Process`, `Wait-Port <port> [-Closed]` -> `[bool]`, `Get-IdleState` -> `{SshdStatus, SshdStartType, SupportEnabled, AuthorizedKeys, LinkState, Session}`, `Get-Field`/`Set-Field`, `Publish-TestRelease <version> [-SigningKey] [-ExtraEntry] [-Tamper <file>]`; every script runner returns `{ExitCode, Output, Text}`; variables `$Root`, `$Work`, `$RelayPort` (2222), `$TunnelPort` (20001).
 
-- [ ] **Step 1: Write the harness**
+- [x] **Step 1: Write the harness**
 
 `tests/pos/Harness.ps1`:
 
@@ -338,7 +338,7 @@ PermitTTY no
 }
 ```
 
-- [ ] **Step 2: Write the SYSTEM runner**
+- [x] **Step 2: Write the SYSTEM runner**
 
 `tests/pos/Invoke-Tests.ps1`:
 
@@ -382,7 +382,7 @@ if (-not (Test-Path "$Log.exit")) { throw 'the tests did not finish within 40 mi
 exit [int](Get-Content "$Log.exit" -Raw).Trim()
 ```
 
-- [ ] **Step 3: Write the install tests**
+- [x] **Step 3: Write the install tests**
 
 `tests/pos/PosTunnel.Tests.ps1` (later tasks append one `Describe` each):
 
@@ -448,7 +448,7 @@ Describe 'Install-PosTunnel' {
 }
 ```
 
-- [ ] **Step 4: Add the CI job**
+- [x] **Step 4: Add the CI job**
 
 In `.github/workflows/ci.yml`, add under `jobs:`, after the `cli` job:
 
@@ -486,7 +486,7 @@ In `.github/workflows/ci.yml`, add under `jobs:`, after the `cli` job:
         run: Get-WinEvent -LogName OpenSSH/Operational -MaxEvents 300 -ErrorAction SilentlyContinue | Sort-Object TimeCreated | ForEach-Object { "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.Message)" }
 ```
 
-- [ ] **Step 5: Commit, push, and watch the tests fail**
+- [x] **Step 5: Commit, push, and watch the tests fail**
 
 Run the local check (expected: no output), then:
 
@@ -500,7 +500,7 @@ git push -u origin HEAD
 
 Run the CI check. Expected: `pos-integration: failure`, all three tests `[-]`, the first with `Expected 0, but got 1.` (the placeholder `Install-PosTunnel` throws `not implemented yet`).
 
-- [ ] **Step 6: Write `Common.ps1`**
+- [x] **Step 6: Write `Common.ps1`**
 
 `pos/package/Common.ps1`:
 
@@ -673,7 +673,7 @@ function Publish-DeviceFields([string]$Version) {
 }
 ```
 
-- [ ] **Step 7: Write `Setup.ps1`**
+- [x] **Step 7: Write `Setup.ps1`**
 
 `pos/package/Setup.ps1` (replacing the placeholder):
 
@@ -862,7 +862,7 @@ try {
 exit [int]($script:failed -gt 0)
 ```
 
-- [ ] **Step 8: Write the `Rekey.ps1` placeholder**
+- [x] **Step 8: Write the `Rekey.ps1` placeholder**
 
 `pos/package/Rekey.ps1`:
 
@@ -879,7 +879,7 @@ $ErrorActionPreference = 'Stop'
 throw 'not implemented yet'
 ```
 
-- [ ] **Step 9: Write `Install-PosTunnel.ps1`**
+- [x] **Step 9: Write `Install-PosTunnel.ps1`**
 
 `pos/ninja/Install-PosTunnel.ps1` (replacing the placeholder):
 
