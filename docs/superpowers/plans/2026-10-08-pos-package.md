@@ -1185,7 +1185,7 @@ Describe 'Install-PosTunnel refusals and upgrades' {
 }
 ```
 
-- [ ] **Step 2: Commit, push, and check**
+- [x] **Step 2: Commit, push, and check**
 
 Run the local check (expected: no output), then:
 
@@ -1211,7 +1211,7 @@ Run the CI check. Expected: `pos-integration: success`, `Tests Passed: 9`, inclu
 - Consumes: `Common.ps1` (`Enter-Lock`, `Exit-Lock`, `Write-Result`, `Set-FileContent`, `Start-Sshd`, `Stop-Session`, the path variables); Task 1's harness (`Open-TestSession`, `Invoke-ThroughTunnel`, `Start-TunnelSsh`, `Wait-Port`, `Get-IdleState`, `Invoke-Action`, `Invoke-Install`).
 - Produces: `Invoke-PosTunnel -Action <Open|Close|Touch|Rekey> [-Name value ...]`; `Open -Port <int> -IdleSeconds <int> -SessionKey <bare base64>`; `Close` and `Touch` with no parameters. `session.json` = `{"port":..,"idle_seconds":..,"started":<Unix seconds>}`; `lease`'s `LastWriteTimeUtc` is the last renewal. `posctl` (its own plan) calls these through NinjaOne.
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 Append to `tests/pos/PosTunnel.Tests.ps1`:
 
