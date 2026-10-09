@@ -286,7 +286,22 @@ Describe 'Watch' {
         $blocker = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 22)
         $blocker.ExclusiveAddressUse = $true
         $blocker.Start()
-        try { $r = Invoke-Watch } finally { $blocker.Stop() }
+        $t0 = Get-Date
+        Write-Host "DIAG t0 $($t0.ToString('HH:mm:ss.fff'))"
+        try {
+            $r = Invoke-Watch
+            Write-Host "DIAG $(Get-Date -f HH:mm:ss.fff) before release: $((Get-Service sshd).Status)"
+            sc.exe qfailure sshd | ForEach-Object { Write-Host "DIAG $_" }
+            Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG listen $($_.LocalAddress) pid $($_.OwningProcess)" }
+            Get-Process sshd -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG sshd pid $($_.Id) started $($_.StartTime.ToString('HH:mm:ss.fff'))" }
+        } finally { $blocker.Stop() }
+        Start-Sleep -Seconds 3
+        Write-Host "DIAG $(Get-Date -f HH:mm:ss.fff) after release: $((Get-Service sshd).Status)"
+        Get-Process sshd -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "DIAG sshd pid $($_.Id) started $($_.StartTime.ToString('HH:mm:ss.fff'))" }
+        Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $t0.AddSeconds(-5) } -ErrorAction SilentlyContinue | Sort-Object TimeCreated |
+            ForEach-Object { Write-Host "DIAG event $($_.TimeCreated.ToString('HH:mm:ss.fff')) $($_.ProviderName) $($_.Id) $($_.Message)" }
+        Get-WinEvent -FilterHashtable @{ LogName = 'OpenSSH/Operational'; StartTime = $t0.AddSeconds(-5) } -ErrorAction SilentlyContinue | Sort-Object TimeCreated |
+            ForEach-Object { Write-Host "DIAG ssh $($_.TimeCreated.ToString('HH:mm:ss.fff')) $($_.LevelDisplayName) $($_.Message)" }
 
         $r.ExitCode | Should -Be 1
         $r.Text | Should -Match "FAILED`tsshd`t"
