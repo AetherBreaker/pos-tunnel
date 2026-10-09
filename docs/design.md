@@ -634,7 +634,10 @@ whose bundled OpenSSH (8.6 or later) has `ssh-keygen -Y`, so `Install-PosTunnel`
 on a fresh POS. Through the API (`POST /v2/device/{id}/script/run`, 204) the agent runs the same
 command line. That call needs a user's token: a client-credentials token gets `403
 user_context_required`, so `posctl` signs in with the authorization-code grant (scope
-`monitoring management offline_access`), and each refresh returns a new refresh token. Reads
+`monitoring management offline_access`). A NinjaOne "Native" client app takes PKCE with no client
+secret, both for the code exchange and for refreshes; its redirect is fixed to `http://127.0.0.1`
+with any port, chosen at sign-in. Access tokens last 3600 s; a refresh returns the same refresh
+token. Reads
 (devices, scripts, activities) work with either. `GET /v2/device/{id}/activities` shows the run as
 `START_REQUESTED`, `STARTED`, then `COMPLETED` within about 20 s, with the script's output in
 `message`. `GET /v2/devices` returns `rolePolicyId` and no `policyId` key (no device in the tenant has
