@@ -1847,7 +1847,7 @@ Run the CI check. Expected: `pos-integration: success`, `Tests Passed: 25`.
 **Interfaces:**
 - Consumes: everything above, and `scripts/sign_pos.py` (`poe sign-pos`), unchanged. It hashes every file in `pos/package/`, `Common.ps1` and `Rekey.ps1` included, and bumps the manifest `version` from 1 to 2.
 
-- [ ] **Step 1: Bring `docs/design.md` up to date**
+- [x] **Step 1: Bring `docs/design.md` up to date**
 
 Make these twelve replacements. Each Old block is the passage exactly as it stands today, line breaks included; replace it with the New block.
 
@@ -2066,7 +2066,7 @@ Make these twelve replacements. Each Old block is the passage exactly as it stan
     - `ssh-keygen -A` regenerating the Win32-OpenSSH server key pair in `C:\ProgramData\ssh` (`rekey`).
     ```
 
-- [ ] **Step 2: Update the README's status line**
+- [x] **Step 2: Update the README's status line**
 
 In `README.md`:
 
@@ -2081,7 +2081,7 @@ New:
 scaffolding).
 ```
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/design.md README.md

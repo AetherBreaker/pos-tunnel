@@ -5,8 +5,8 @@ dial out to a hardened SSH relay; the operator (or a coding agent on the operato
 connects through the relay. Sessions have a 12-hour idle timeout, renewable up to a 72-hour maximum,
 and leave nothing enabled on the POS when they end.
 
-**Status:** design complete, implementation not started. Everything below `cli/`, `pos/` and `relay/`
-is scaffolding.
+**Status:** the relay and the POS package are implemented; `posctl` is not (everything below `cli/` is
+scaffolding).
 
 - [`docs/design.md`](docs/design.md): the design (threat model, keys, timers, flows).
 - [`cli/`](cli/): `posctl`, the Rust CLI run on the operator workstation.
