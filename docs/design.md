@@ -521,7 +521,8 @@ ready to paste into Coolify.
   install. It is resolved before anything is written, so a mistyped or offline one changes nothing.
   Order: `relay keygen`, paste the line into Coolify and
   redeploy, then `relay point`. A POS NinjaOne refuses to start the install on is listed while the
-  others still start; the command then fails, and running it again retries.
+  others still start; the command then fails, and running it again retries. With no POS in the
+  organization it refuses before writing anything.
 - `signing keygen`: generates a passphrase-protected release signing key pair, stores the private key
   in `posctl-admin`'s config dir, rewrites `pos/allowed_signers` (run from a checkout of this repo),
   and writes the public key to `posTunnelSigner` at once. Then point `POS_TUNNEL_SIGNING_KEY` at it,

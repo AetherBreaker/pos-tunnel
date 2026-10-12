@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use posctl::admin::{self, ALLOWED_SIGNERS, Operators};
 use posctl::bundle::Bundle;
-use posctl::config::{Config, NinjaOne, Relay, parse_host_port};
+use posctl::config::{Config, NinjaOne, Relay, parse_host_port, pinned_relay};
 use posctl::ninja::{self, Api, Named};
 use posctl::{fleet, keys};
 use serde_json::json;
@@ -153,8 +153,22 @@ fn main() -> Result<()> {
             install_script_id: script("Install-PosTunnel")?,
             invoke_script_id: script("Invoke-PosTunnel")?,
         };
-        // A rerun keeps the relay this workstation already pins.
-        let relay = Config::load().ok().and_then(|existing| existing.relay);
+        // A rerun keeps the relay this workstation already pins, also from a file that predates a field.
+        let path = Config::path()?;
+        let relay = match fs::read_to_string(&path) {
+            Ok(text) => pinned_relay(&text).with_context(|| {
+                format!(
+                    "{} is not a posctl config; move it aside to start over",
+                    path.display()
+                )
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let next = match &relay {
+            Some(relay) => format!("It still pins the relay {}:{}.", relay.host, relay.port),
+            None => "Next: `posctl-admin relay keygen <host>`.".to_owned(),
+        };
         Config {
             operator_key: std::path::absolute(&operator_key)?,
             ninjaone,
@@ -167,7 +181,7 @@ fn main() -> Result<()> {
             .insert(name.clone(), keys::public_of_file(&operator_key)?);
         operators.save()?;
         println!(
-            "posctl is set up for {name}: organization '{organization}' (id {organization_id}), policy '{policy}' (id {pos_policy_id}). Next: `posctl-admin relay keygen <host>`."
+            "posctl is set up for {name}: organization '{organization}' (id {organization_id}), policy '{policy}' (id {pos_policy_id}). {next}"
         );
         return Ok(());
     }
