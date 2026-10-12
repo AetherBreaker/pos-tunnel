@@ -6,14 +6,13 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use posctl::admin::{self, Operators};
+use posctl::admin::{self, ALLOWED_SIGNERS, Operators};
 use posctl::bundle::Bundle;
 use posctl::config::{Config, NinjaOne, Relay, parse_host_port};
 use posctl::ninja::{self, Api};
 use posctl::{fleet, keys};
 use serde_json::json;
 
-const ALLOWED_SIGNERS: &str = "pos/allowed_signers";
 const SIGNING_NAMESPACE: &str = "pos-tunnel-release";
 
 #[derive(Parser)]
@@ -76,8 +75,12 @@ enum SigningCommand {
     /// Generate a release signing key pair (passphrase-protected), rewrite pos/allowed_signers and
     /// publish the public key. Run from a checkout of pos-tunnel; then re-sign and release.
     Keygen,
-    /// Publish the public key in pos/allowed_signers to the posTunnelSigner fleet field.
-    Publish,
+    /// Publish the signing public key a release was made with to the posTunnelSigner fleet field: the
+    /// one in pos/allowed_signers at that release's git tag, whatever is checked out.
+    Publish {
+        /// The release's git tag.
+        tag: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,15 +256,10 @@ fn main() -> Result<()> {
                     );
                     public_key
                 }
-                SigningCommand::Publish => {
-                    let text = fs::read_to_string(ALLOWED_SIGNERS).with_context(|| {
-                        format!("run this from a checkout of pos-tunnel ({ALLOWED_SIGNERS})")
-                    })?;
-                    let key = text
-                        .split_once("ssh-ed25519")
-                        .map(|(_, rest)| format!("ssh-ed25519{rest}"))
-                        .context("no ed25519 key in it")?;
-                    keys::parse_public(&key)?
+                SigningCommand::Publish { tag } => {
+                    let public_key = admin::signer_at_tag(Path::new("."), &tag)?;
+                    println!("Signing public key at tag {tag}: {public_key}");
+                    public_key
                 }
             };
             let ninja = &config.ninjaone;

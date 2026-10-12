@@ -522,7 +522,9 @@ ready to paste into Coolify.
   in `posctl-admin`'s config dir, rewrites `pos/allowed_signers` (run from a checkout of this repo),
   and writes the public key to `posTunnelSigner` at once. Then point `POS_TUNNEL_SIGNING_KEY` at it,
   re-sign and release: until a release signed with the new key exists, POSes reject new releases and
-  keep their installed version. `signing publish` writes the key already in `pos/allowed_signers`.
+  keep their installed version. `signing publish <tag>` writes the key a release was made with, the one
+  in `pos/allowed_signers` at that release's git tag, read from the repository whatever is checked out,
+  and prints the tag and the key; anything but a tag is refused.
 - `operator add <name>`, `operator remove <name>`, `operator list`: `add` generates an operator key
   pair and prints, once, a single-line bundle for the new operator's `posctl operator import`: base64
   of a small TOML document holding the operator private key and the admin's `config.toml` (NinjaOne
@@ -668,8 +670,8 @@ and permissions as sent (`posctl-admin` created the six). Still open:
    client app (redirect `http://127.0.0.1`, scopes Monitoring, Management and Offline Access, grant
    types Authorization Code and Refresh Token); `posctl-admin init` (it signs in); add the
    `Include`. The first fleet-field write creates the custom fields.
-3. Release: `posctl-admin signing publish` (or `signing keygen` for a new key); `poe sign-pos`;
-   commit; `poe release`.
+3. Release: `poe sign-pos`; commit; `poe release`; then `posctl-admin signing publish <tag>` with that
+   release's tag (`signing keygen` first, for a new signing key).
 4. Relay: `posctl-admin relay keygen <host>[:<port>]` and `operator list` (or `add` for a second
    operator); in Coolify, a Docker Compose application from `pos-tunnel-relay`, with both lines in its
    environment; deploy; add the DNS record; open 2222 in the Vultr firewall.
