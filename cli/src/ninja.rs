@@ -269,16 +269,27 @@ pub struct FieldDefinition {
 
 impl Api {
     pub fn connect(base_url: &str, client_id: &str) -> Result<Api> {
-        let refresh = token_store::load()?;
+        Api::with_refresh_token(base_url, client_id, &token_store::load()?)
+    }
+
+    /// `connect` without the token store, so a test never touches a real sign-in.
+    pub fn with_refresh_token(base_url: &str, client_id: &str, refresh: &str) -> Result<Api> {
         let tokens: Value = token_request(
             base_url,
             &[
                 ("grant_type", "refresh_token"),
                 ("client_id", client_id),
-                ("refresh_token", &refresh),
+                ("refresh_token", refresh),
             ],
         )
-        .context("refreshing the NinjaOne sign-in failed; run `posctl login`")?;
+        .map_err(|e| {
+            // Signing in again cures a refusal, not an unreachable NinjaOne.
+            if e.chain().any(|cause| cause.is::<ureq::Error>()) {
+                e.context(format!("couldn't reach NinjaOne at {base_url}"))
+            } else {
+                e.context("refreshing the NinjaOne sign-in failed; run `posctl login`")
+            }
+        })?;
         let access_token = tokens["access_token"]
             .as_str()
             .context("NinjaOne returned no access token")?
@@ -343,18 +354,22 @@ impl Api {
     pub fn devices(&self, organization: i64) -> Result<Vec<Device>> {
         let mut devices: Vec<Device> = Vec::new();
         loop {
-            let after = devices
-                .last()
-                .map(|d| format!("&after={}", d.id))
-                .unwrap_or_default();
+            let last = devices.last().map(|device| device.id);
+            let after = last.map(|id| format!("&after={id}")).unwrap_or_default();
             let page: Vec<Device> = self.get(&format!(
                 "/v2/organization/{organization}/devices?pageSize=1000{after}"
             ))?;
-            let done = page.len() < 1000;
-            devices.extend(page);
-            if done {
+            // Until an empty page, not a short one: NinjaOne may cap a page below the size asked for.
+            let Some(end) = page.last().map(|device| device.id) else {
                 return Ok(devices);
+            };
+            // A server that ignored `after` would be read forever.
+            if last.is_some_and(|last| end <= last) {
+                bail!(
+                    "NinjaOne's device list for organization {organization} didn't advance past device {end}"
+                );
             }
+            devices.extend(page);
         }
     }
 
@@ -503,32 +518,58 @@ mod tests {
     }
 
     #[test]
-    fn devices_are_read_a_page_at_a_time() {
+    fn devices_are_read_a_page_at_a_time_until_an_empty_page() {
+        // A server that caps a page at two devices, whatever page size is asked for.
         let fake = crate::fake::Fake::start(|_, path, _| {
-            let page: Vec<Value> = match path {
-                "/v2/organization/3/devices?pageSize=1000" => (1..=1000)
-                    .map(|id| json!({"id": id, "organizationId": 3}))
-                    .collect(),
-                "/v2/organization/3/devices?pageSize=1000&after=1000" => {
-                    vec![json!({"id": 1001, "organizationId": 3})]
-                }
-                _ => vec![],
-            };
+            let after: i64 = path
+                .split_once("&after=")
+                .map_or(0, |(_, id)| id.parse().unwrap());
+            let page: Vec<Value> = (after + 1..=5)
+                .take(2)
+                .map(|id| json!({"id": id, "organizationId": 3}))
+                .collect();
             (200, Value::Array(page))
         });
-        assert_eq!(
-            Api::with_token(&fake.url, "t").devices(3).unwrap().len(),
-            1001
-        );
-        // The second page starts after the first page's last device, and there is no third.
-        assert_eq!(
-            fake.requests_to("GET", "/v2/organization/3/devices?pageSize=1000&after=1000")
-                .len(),
-            1
-        );
+        assert_eq!(Api::with_token(&fake.url, "t").devices(3).unwrap().len(), 5);
+        // Each page starts after the previous page's last device; the empty one ends the list.
+        for after in ["", "&after=2", "&after=4", "&after=5"] {
+            let path = format!("/v2/organization/3/devices?pageSize=1000{after}");
+            assert_eq!(fake.requests_to("GET", &path).len(), 1, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_device_list_that_does_not_advance_is_refused() {
+        // A server that ignores `after` would otherwise be read forever.
+        let fake =
+            crate::fake::Fake::start(|_, _, _| (200, json!([{"id": 1, "organizationId": 3}])));
+        let error = Api::with_token(&fake.url, "t")
+            .devices(3)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("didn't advance past device 1"), "{error}");
+    }
+
+    #[test]
+    fn an_unreachable_ninjaone_is_not_blamed_on_the_sign_in() {
+        // A port nothing listens on.
+        let port = TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let unreachable = Api::with_refresh_token(&format!("http://127.0.0.1:{port}"), "c", "r");
+        let error = format!("{:#}", unreachable.err().unwrap());
         assert!(
-            fake.requests_to("GET", "/v2/organization/3/devices?pageSize=1000&after=1001")
-                .is_empty()
+            error.contains("couldn't reach NinjaOne") && !error.contains("posctl login"),
+            "{error}"
+        );
+        let fake = crate::fake::Fake::start(|_, _, _| (400, json!({"error": "invalid_grant"})));
+        let refused = Api::with_refresh_token(&fake.url, "c", "r");
+        let error = format!("{:#}", refused.err().unwrap());
+        assert!(
+            error.contains("run `posctl login`") && error.contains("invalid_grant"),
+            "{error}"
         );
     }
 }

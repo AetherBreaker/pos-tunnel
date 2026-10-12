@@ -1,4 +1,4 @@
-//! A fake NinjaOne for tests: answers each request from a handler and records it.
+//! A fake NinjaOne, and GitHub raw file host, for tests: answers each request from a handler and records it.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -15,7 +15,8 @@ pub struct Fake {
 
 impl Fake {
     /// Serves until the test process ends; `handler` gets method, path with query, and the JSON body
-    /// (`Null` when there is none) and returns the status and JSON reply.
+    /// (`Null` when there is none) and returns the status and the reply: JSON, or a string for a
+    /// plain-text body.
     pub fn start(handler: impl Fn(&str, &str, &Value) -> (u16, Value) + Send + 'static) -> Fake {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
