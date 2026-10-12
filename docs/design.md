@@ -52,7 +52,7 @@ All key pairs are ed25519.
 | Operator key pair (per operator)                 | by `posctl-admin operator add` (the admin's own: by hand, section 12)                                                      | that operator's workstation, installed with `posctl operator import`          | relay env var `OPERATOR_KEYS` → `/etc/ssh/operator_keys` (root-owned) at container start                                                                    | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only); names the operator in `tunnelctl`'s log. Identity, not a security boundary. |
 | Relay SSH server key pair                        | by `posctl-admin relay keygen`; again only to rotate it or move the relay                                                  | relay env var `RELAY_SSH_PRIVATE_KEY`; a copy in `posctl-admin`'s config dir  | `relay point` → fleet field → `Setup` → POS `known_hosts`; `posctl` config via `relay keygen --activate` (admin), `operator import` or `relay set` (others) | POS and operator verify the relay                                                                                                                |
 | Release signing key pair                         | by `posctl-admin signing keygen`; again only if lost or leaked                                                             | admin workstation only — never CI, so a compromised GitHub account can't sign | `signing keygen` → fleet field → `Install-PosTunnel`; and `pos/allowed_signers`, for CI's check                                                             | POS package releases (namespace `pos-tunnel-release`)                                                                                            |
-| NinjaOne API client credentials (not a key pair) | in NinjaOne's console                                                                                                      | OS keyring (`posctl login`)                                                   | —                                                                                                                                                           | running SYSTEM scripts on every POS; the admin's also writes the fleet fields                                                                    |
+| NinjaOne sign-in (not a key pair)                | by `posctl login` (the admin's: `posctl-admin init`), a browser sign-in through the tenant's Native client app             | Windows Credential Manager (a user-only file elsewhere)                       | —                                                                                                                                                           | running SYSTEM scripts on every POS, as that NinjaOne user; the admin's also writes the fleet fields                                             |
 
 All fields are NinjaOne global custom fields (text).
 
@@ -72,9 +72,10 @@ organization values script "delegate" devices can write.
 
 `posctl-admin` owns these settings: before any fleet-field write it reads all six definitions
 (`GET /v2/custom-fields/field-name/{name}`: `definitionScope`, `scriptPermission`,
-`apiPermission`), creates any that are missing (`POST /v2/custom-fields`) with the settings above,
-and refuses, naming the field and setting, if an existing one differs. It never changes an existing
-definition, since a changed setting may be tampering.
+`apiPermission`) and refuses, naming the field and setting, if an existing one differs; then it
+creates any that are missing (`POST /v2/custom-fields`, global fields: `scope` `NODE_GLOBAL`) with
+the settings above and reads each back. It never changes an existing definition, since a changed
+setting may be tampering.
 
 ## 4. Ports and naming
 
@@ -279,8 +280,8 @@ address and public key, the signing public key) reaches POSes through the fleet 
 **Signing** (admin workstation): after changing `pos/package/`, `poe sign-pos`
 (`scripts/sign_pos.py`) rewrites `pos/manifest.json` (the POS package `version` and a `sha256` per
 file) and signs it with `ssh-keygen -Y sign -n pos-tunnel-release` → `pos/manifest.json.sig`; both are
-committed. The private key is the one `posctl-admin signing keygen` stored (`POS_TUNNEL_SIGNING_KEY`
-overrides the path). The package version is independent of the wheel version and rises only when the files
+committed. The private key is the one `posctl-admin signing keygen` stored, at the path in
+`POS_TUNNEL_SIGNING_KEY`. The package version is independent of the wheel version and rises only when the files
 change, so CLI-only releases don't touch the fleet.
 
 **Release:** `devkit release` as usual. CI builds the `posctl` wheels; the `pos-package` job
@@ -475,7 +476,8 @@ configuration.
 
 ### 7.7 Setup commands: `login`, `operator import`, `relay set`, `update`
 
-- `login`: prompts for the NinjaOne client ID and secret and stores them in the OS keyring.
+- `login`: signs in to NinjaOne in the browser through the tenant's Native client app (section 8) and
+  keeps the refresh token in Windows Credential Manager. Needs `config.toml` (`operator import`).
 - `operator import`: prompts (hidden input, never an argument, so it stays out of shell history) for
   the bundle `posctl-admin operator add` printed, then installs its operator private key and writes
   `config.toml` from it.
@@ -493,44 +495,53 @@ is still compromised gains nothing, since the attacker reads the new private key
 
 ### 7.9 `posctl-admin`
 
-Runs only when the operator's private key matches the admin public key built into the binary. That
-isn't a security boundary (the admin's NinjaOne credential is what can change the fleet); it keeps
-these commands out of `posctl --help`, so an agent working through `posctl` doesn't come across them.
-Uses a NinjaOne credential that can write the fleet fields. Every command that produces relay
-configuration prints it as a `.env` line ready to paste into Coolify.
+Runs only when the operator's private key matches the admin public key built into the binary
+(`cli/admin.pub`). That isn't a security boundary (the admin's NinjaOne sign-in is what can change
+the fleet); it keeps these commands out of `posctl --help`, so an agent working through `posctl`
+doesn't come across them. Every command that produces relay configuration prints it as a `.env` line
+ready to paste into Coolify.
 
-- `relay keygen [--activate [<host>[:<port>]]]`: generates a relay SSH server key pair, stores the
-  private key in `posctl-admin`'s config dir and prints the `RELAY_SSH_PRIVATE_KEY=` line.
-  `--activate` makes it the active pair: this workstation's `posctl` config takes its public key, and
-  the host and port if given (port default 2222).
-- `relay point <host>[:<port>]`: derives the public key from the active relay private key (locally,
-  never queried over the network, where an attacker could answer with theirs), writes the fleet relay
-  fields, then runs `Install-PosTunnel -Force` on every POS at once. Open sessions end; offline POSes
-  converge at their next daily run. Serves both rotating the relay's key pair and moving to a new
-  relay; in either case the fleet is unreachable until it runs, so it never waits. Prints the
-  `posctl relay set …` line for the other operators. Order: `relay keygen --activate`, paste the line
-  into Coolify and redeploy, then `relay point`.
-- `signing keygen`: generates a release signing key pair, stores the private key where `poe sign-pos`
-  reads it, rewrites `pos/allowed_signers` (run from a checkout of this repo), and writes the public
-  key to `posTunnelSigner` at once. Then re-sign and release: until a release signed with the new key
-  exists, POSes reject new releases and keep their installed version.
+- `init --base-url <url> --client-id <id> --policy <name> --operator-key <path> --name <name>`: signs
+  in to NinjaOne (as `login`), finds the POS policy and the two library scripts by exact name, writes
+  this workstation's `config.toml` (keeping a relay it already pins) and lists the admin as an
+  operator.
+- `relay keygen <host>[:<port>]`: generates a relay SSH server key pair, stores the private key in
+  `posctl-admin`'s config dir, makes this workstation's `posctl` pin its public key at that address
+  (port default 2222), and prints the `RELAY_SSH_PRIVATE_KEY=` line.
+- `relay point [--device <DisplayName>]`: derives the public key from the stored relay private key
+  (locally, never queried over the network, where an attacker could answer with theirs), writes the
+  fleet relay fields, then runs `Install-PosTunnel -Force` on every online POS at once. Open sessions
+  end; offline POSes converge at their next daily run. Serves both rotating the relay's key pair and
+  moving to a new relay; in either case the fleet is unreachable until it runs, so it never waits.
+  Prints the `posctl relay set …` line for the other operators. `--device` runs the install on that
+  one POS only, to try a relay on a test device first; it is resolved before anything is written, so
+  a mistyped or offline one changes nothing. Order: `relay keygen`, paste the line into Coolify and
+  redeploy, then `relay point`.
+- `signing keygen`: generates a passphrase-protected release signing key pair, stores the private key
+  in `posctl-admin`'s config dir, rewrites `pos/allowed_signers` (run from a checkout of this repo),
+  and writes the public key to `posTunnelSigner` at once. Then point `POS_TUNNEL_SIGNING_KEY` at it,
+  re-sign and release: until a release signed with the new key exists, POSes reject new releases and
+  keep their installed version. `signing publish` writes the key already in `pos/allowed_signers`.
 - `operator add <name>`, `operator remove <name>`, `operator list`: `add` generates an operator key
   pair and prints, once, a single-line bundle for the new operator's `posctl operator import`: base64
   of a small TOML document holding the operator private key and the admin's `config.toml` (NinjaOne
-  base URL, script IDs, POS policy ID, relay host, port and public key). It contains a private key, so
-  it travels like a password (e.g. a password manager), never by email or chat. `posctl-admin` keeps
-  only the public keys, the admin's own included. All three print the full `OPERATOR_KEYS=` line;
-  redeploy the relay to apply it. The new operator still runs `posctl login` with their own NinjaOne
-  credential.
+  base URL and Native client ID, script IDs, POS policy ID, relay host, port and public key). It
+  contains a private key, so it travels like a password (e.g. a password manager), never by email or
+  chat. `posctl-admin` keeps only the public keys, the admin's own included, and `remove` refuses the
+  admin's. All three print the full `OPERATOR_KEYS=` line; redeploy the relay to apply it. The new
+  operator still runs `posctl login`, signing in as their own NinjaOne user.
 
 ## 8. Operator workstation
 
-- Config `posctl/config.toml` in the platform config dir: NinjaOne API base URL (region-specific),
-  library script IDs for `Install-PosTunnel` and `Invoke-PosTunnel`, and the POS policy ID; relay
-  host, port and public key (set by `relay keygen --activate` on the admin's workstation,
-  `operator import` or `relay set` on others); operator private key path.
-- NinjaOne API (OAuth client credentials; scopes `monitoring` to read, `management` to run scripts
-  and write fields; base URL `app`, `us2`, `eu`, `ca` or `oc` `.ninjarmm.com`):
+- Config `posctl/config.toml` in the platform config dir (`POSCTL_CONFIG_HOME` overrides it): NinjaOne
+  API base URL (region-specific) and Native client ID, library script IDs for `Install-PosTunnel` and
+  `Invoke-PosTunnel`, and the POS policy ID (written by `posctl-admin init`); relay host, port and
+  public key (set by `relay keygen` on the admin's workstation, `operator import` or `relay set` on
+  others); operator private key path.
+- NinjaOne API (OAuth authorization code with PKCE through the tenant's Native client app, no client
+  secret; scopes `monitoring` to read, `management` to run scripts and write fields,
+  `offline_access` for the refresh token, which `login` keeps and each command trades for an access
+  token; base URL `app`, `us2`, `eu`, `ca` or `oc` `.ninjarmm.com`):
   - `GET /v2/devices`: `displayName`, `offline`, `policyId` (an override) else `rolePolicyId`. A POS
     is a device whose effective policy is the POS policy. The device filter has no policy term, so
     `posctl` filters client-side; this defines "every POS" and limits `connect`'s name match.
@@ -641,21 +652,25 @@ token. Reads
 (devices, scripts, activities) work with either. `GET /v2/device/{id}/activities` shows the run as
 `START_REQUESTED`, `STARTED`, then `COMPLETED` within about 20 s, with the script's output in
 `message`. `GET /v2/devices` returns `rolePolicyId` and no `policyId` key (no device in the tenant has
-an override). Still open:
+an override). Creating a custom field (`POST /v2/custom-fields`) needs the deprecated `scope`
+(`NODE_GLOBAL` for a global field) beside `definitionScope`, and NinjaOne stores the definition scope
+and permissions as sent (`posctl-admin` created the six). Still open:
 
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 
 ## 12. Deployment order
 
-1. Admin key: generate the admin's operator key pair by hand (`ssh-keygen -t ed25519`) and build its
-   public key into `posctl-admin`.
-2. NinjaOne: paste `Install-PosTunnel` and `Invoke-PosTunnel` into the library; create the admin's
-   API client (`posctl-admin` creates the custom fields on its first fleet-field write);
-   `posctl login`; write `config.toml`, add the `Include`.
-3. Release: `posctl-admin signing keygen`; `poe sign-pos`; commit; `poe release`.
-4. Relay: `posctl-admin relay keygen --activate <host>[:<port>]` and `operator list` (or `add` for a second
+1. Admin key: generate the admin's operator key pair by hand (`ssh-keygen -t ed25519`) and commit its
+   public key as `cli/admin.pub`, which `posctl-admin` is built with.
+2. NinjaOne: paste `Install-PosTunnel` and `Invoke-PosTunnel` into the library; create a Native
+   client app (redirect `http://127.0.0.1`, scopes Monitoring, Management and Offline Access, grant
+   types Authorization Code and Refresh Token); `posctl-admin init` (it signs in); add the
+   `Include`. The first fleet-field write creates the custom fields.
+3. Release: `posctl-admin signing publish` (or `signing keygen` for a new key); `poe sign-pos`;
+   commit; `poe release`.
+4. Relay: `posctl-admin relay keygen <host>[:<port>]` and `operator list` (or `add` for a second
    operator); in Coolify, a Docker Compose application from `pos-tunnel-relay`, with both lines in its
    environment; deploy; add the DNS record; open 2222 in the Vultr firewall.
-5. With only one test device in the POS policy: `posctl-admin relay point <host>`, then test end to
-   end. Then add the fleet to the policy and schedule `Install-PosTunnel` daily.
+5. `posctl-admin relay point --device <test POS>`, then test end to end. Then `relay point` for the
+   whole fleet, and schedule `Install-PosTunnel` daily in the POS policy.
