@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -43,6 +44,33 @@ pub fn relay_key_path() -> Result<PathBuf> {
 
 pub fn signing_key_path() -> Result<PathBuf> {
     Ok(dir()?.join("signing_key"))
+}
+
+/// Where the repository keeps the release signing public key, in `ssh-keygen -Y verify`'s format.
+pub const ALLOWED_SIGNERS: &str = "pos/allowed_signers";
+
+/// The signing public key in `ALLOWED_SIGNERS` at the release tag `tag` of the repository at `repo`,
+/// read from git and never from the checkout: a branch, a stale tree or an uncommitted edit can't
+/// become what the fleet trusts. `refs/tags/` makes git refuse a branch or commit by that name.
+pub fn signer_at_tag(repo: &Path, tag: &str) -> Result<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("refs/tags/{tag}:{ALLOWED_SIGNERS}")])
+        .output()
+        .context("running git")?;
+    if !out.status.success() {
+        bail!(
+            "git has no {ALLOWED_SIGNERS} at tag '{tag}' (run this in a clone of pos-tunnel, after `git fetch --tags` if the release was made elsewhere): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let key = text
+        .split_once("ssh-ed25519")
+        .map(|(_, rest)| format!("ssh-ed25519{rest}"))
+        .with_context(|| format!("no ed25519 key in {ALLOWED_SIGNERS} at tag '{tag}'"))?;
+    keys::parse_public(&key)
 }
 
 /// The relay's `RELAY_SSH_PRIVATE_KEY` line: base64 of the OpenSSH private key file (design section 6.1).
@@ -188,5 +216,47 @@ mod tests {
         let error = require_admin(&dir.join("other")).unwrap_err().to_string();
         assert!(error.contains("not the admin's operator key"), "{error}");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_signer_is_read_at_a_tag_and_never_from_the_checkout() {
+        let dir = std::env::temp_dir().join(format!("posctl-signer-{}", std::process::id()));
+        fs::create_dir_all(dir.join("pos")).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let key = || keys::public_line(keys::generate("").unwrap().public_key()).unwrap();
+        let (released, later) = (key(), key());
+        let commit = |signer: &str| {
+            let line = format!("pos-tunnel-release namespaces=\"pos-tunnel-release\" {signer}\n");
+            fs::write(dir.join(ALLOWED_SIGNERS), line).unwrap();
+            git(&["add", "."]);
+            git(&["commit", "-q", "-m", "signer"]);
+        };
+        git(&["init", "-q", "-b", "main"]);
+        commit(&released);
+        git(&["tag", "v1"]);
+        commit(&later);
+
+        assert_eq!(signer_at_tag(&dir, "v1").unwrap(), released);
+        // Only a tag names a release: a branch, a commit and a tag that doesn't exist are refused.
+        for not_a_tag in ["main", "HEAD", "v2"] {
+            let error = signer_at_tag(&dir, not_a_tag).unwrap_err().to_string();
+            assert!(error.contains(&format!("at tag '{not_a_tag}'")), "{error}");
+        }
+        // Git's object files are read-only, which Windows may refuse to delete.
+        let _ = fs::remove_dir_all(&dir);
     }
 }
