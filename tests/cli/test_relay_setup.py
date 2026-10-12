@@ -74,7 +74,8 @@ class Setup:
     config.parent.mkdir(parents=True)
     config.write_text(
       f"operator_key = {json.dumps(str(admin_key))}\n\n[ninjaone]\n"
-      'base_url = "https://example.invalid"\nclient_id = "c"\npos_policy_id = 1\ninstall_script_id = 2\ninvoke_script_id = 3\n',
+      'base_url = "https://example.invalid"\nclient_id = "c"\norganization_id = 4\n'
+      "pos_policy_id = 1\ninstall_script_id = 2\ninvoke_script_id = 3\n",
       encoding="utf-8",
     )
     (self.admin_home / "posctl-admin").mkdir()

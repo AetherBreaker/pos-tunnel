@@ -1,7 +1,5 @@
 //! The six custom fields and the fleet-wide NinjaOne operations of `posctl-admin` (design sections 3, 7.9).
 
-use std::collections::BTreeSet;
-
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
@@ -133,19 +131,19 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
     Ok(missing.iter().map(|field| field.name).collect())
 }
 
-/// The POSes: devices whose effective policy is the POS policy (design section 8).
-pub fn pos_devices(api: &Api, pos_policy: i64) -> Result<Vec<Device>> {
+/// The POSes: the organization's devices whose effective policy is the POS policy (design section 8).
+pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
     Ok(api
-        .devices()?
+        .devices(ninja.organization_id)?
         .into_iter()
-        .filter(|device| device.effective_policy() == Some(pos_policy))
+        .filter(|device| device.effective_policy() == Some(ninja.pos_policy_id))
         .collect())
 }
 
 /// The one POS whose display name is exactly `name` (case-sensitive, design section 4). No match or
 /// several is an error naming what was found.
-pub fn find_pos(api: &Api, pos_policy: i64, name: &str) -> Result<Device> {
-    let poses = pos_devices(api, pos_policy)?;
+pub fn find_pos(api: &Api, ninja: &NinjaOne, name: &str) -> Result<Device> {
+    let poses = pos_devices(api, ninja)?;
     let mut matches: Vec<Device> = poses
         .iter()
         .filter(|d| d.display_name.as_deref() == Some(name))
@@ -178,34 +176,17 @@ pub fn find_pos(api: &Api, pos_policy: i64, name: &str) -> Result<Device> {
     }
 }
 
-/// Writes fleet field values on every organization that holds a POS, after `ensure_fields`. A POS reads
-/// its organization's value (design section 3). Returns those organizations.
-pub fn set_fleet_fields(api: &Api, pos_policy: i64, values: &Value) -> Result<Vec<i64>> {
+/// Writes fleet field values on the organization, after `ensure_fields`: the one door for a fleet-field
+/// write, so a changed definition is always refused first. A POS reads its organization's value
+/// (design section 3).
+pub fn set_fleet_fields(api: &Api, ninja: &NinjaOne, values: &Value) -> Result<()> {
     ensure_fields(api)?;
-    let organizations: BTreeSet<i64> = pos_devices(api, pos_policy)?
-        .iter()
-        .map(|device| device.organization_id)
-        .collect();
-    if organizations.is_empty() {
-        bail!(
-            "no device has the POS policy, so there is no organization to write the fleet fields on"
-        );
-    }
-    let mut written = Vec::new();
-    for &organization in &organizations {
-        api.set_organization_fields(organization, values).with_context(|| {
-            format!("the fields were written on organizations {written:?} of {organizations:?} before this failed")
-        })?;
-        written.push(organization);
-    }
-    Ok(written)
+    api.set_organization_fields(ninja.organization_id, values)
 }
 
 /// What `relay point` did.
 #[derive(Debug, PartialEq)]
 pub struct Pointed {
-    /// The organizations whose fleet relay fields were written.
-    pub organizations: Vec<i64>,
     /// The POSes `Install-PosTunnel -Force` was started on.
     pub ran: Vec<String>,
     /// The offline POSes skipped; they converge at their next scheduled install.
@@ -214,9 +195,11 @@ pub struct Pointed {
     pub failed: Vec<String>,
 }
 
-/// `posctl-admin relay point`: writes the fleet relay fields, then starts `Install-PosTunnel -Force` on
-/// every online POS at once, or on `device` alone (a test POS, by exact display name). `device` is
-/// resolved first, so a mistyped or offline one changes nothing.
+/// `posctl-admin relay point`: writes the organization's fleet relay fields, then starts
+/// `Install-PosTunnel -Force` on every online POS at once, or on `device` alone (a test POS, by exact
+/// display name). `device` limits the install only: the organization's relay changes either way, so
+/// its other POSes follow at their next scheduled install. It is resolved first, so a mistyped or
+/// offline one changes nothing.
 pub fn point_relay(
     api: &Api,
     ninja: &NinjaOne,
@@ -224,9 +207,7 @@ pub fn point_relay(
     public_key: &str,
     device: Option<&str>,
 ) -> Result<Pointed> {
-    let target = device
-        .map(|name| find_pos(api, ninja.pos_policy_id, name))
-        .transpose()?;
+    let target = device.map(|name| find_pos(api, ninja, name)).transpose()?;
     if let Some(target) = &target
         && target.offline
     {
@@ -236,10 +217,10 @@ pub fn point_relay(
         );
     }
     let values = json!({"posTunnelRelay": address, "posTunnelRelayServerKey": public_key});
-    let organizations = set_fleet_fields(api, ninja.pos_policy_id, &values)?;
+    set_fleet_fields(api, ninja, &values)?;
     let targets = match target {
         Some(target) => vec![target],
-        None => pos_devices(api, ninja.pos_policy_id)?,
+        None => pos_devices(api, ninja)?,
     };
     let (mut ran, mut offline, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for device in targets {
@@ -259,7 +240,6 @@ pub fn point_relay(
         }
     }
     Ok(Pointed {
-        organizations,
         ran,
         offline,
         failed,
@@ -271,13 +251,27 @@ mod tests {
     use super::*;
     use crate::fake::Fake;
 
-    fn devices() -> Value {
-        json!([
+    /// What NinjaOne lists at `path`. Organization 3 holds the POSes and an office PC; organization 5
+    /// holds one device on the POS policy, which this system must never see. Any path but an
+    /// organization's gets the whole tenant, as `GET /v2/devices` would.
+    fn devices(path: &str) -> Value {
+        let mut all = json!([
             {"id": 1, "displayName": "POS 000 Test", "organizationId": 3, "rolePolicyId": 7, "offline": false},
             {"id": 2, "displayName": "POS 001", "organizationId": 3, "rolePolicyId": 7, "offline": true},
-            {"id": 3, "displayName": "Office PC", "organizationId": 4, "rolePolicyId": 8, "offline": false},
-            {"id": 4, "displayName": "POS 900", "organizationId": 5, "rolePolicyId": 8, "policyId": 7, "offline": false},
-        ])
+            {"id": 3, "displayName": "Office PC", "organizationId": 3, "rolePolicyId": 8, "offline": false},
+            {"id": 4, "displayName": "POS 900", "organizationId": 3, "rolePolicyId": 8, "policyId": 7, "offline": false},
+            {"id": 9, "displayName": "POS 950", "organizationId": 5, "rolePolicyId": 7, "offline": false},
+        ]);
+        let organization = path
+            .strip_prefix("/v2/organization/")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|id| id.parse::<i64>().ok());
+        if let Some(organization) = organization {
+            all.as_array_mut()
+                .unwrap()
+                .retain(|device| device["organizationId"] == organization);
+        }
+        all
     }
 
     /// A tenant whose six fields already exist as they should, with `devices()`; it accepts every write
@@ -294,7 +288,7 @@ mod tests {
                     let definition = json!({"name": field.name, "definitionScope": [scope], "scriptPermission": script, "apiPermission": api});
                     (200, definition)
                 }
-                ("GET", None) => (200, devices()),
+                ("GET", None) => (200, devices(path)),
                 _ if refused == Some(path) => (500, json!({"resultCode": "FAILURE"})),
                 _ => (204, Value::Null),
             }
@@ -309,6 +303,7 @@ mod tests {
         NinjaOne {
             base_url: String::new(),
             client_id: String::new(),
+            organization_id: 3,
             pos_policy_id: 7,
             install_script_id: 93,
             invoke_script_id: 94,
@@ -396,29 +391,54 @@ mod tests {
     }
 
     #[test]
-    fn fleet_fields_go_to_each_organization_holding_a_pos_once() {
+    fn fleet_fields_are_written_on_the_one_organization() {
         let fake = tenant();
         let values = json!({"posTunnelSigner": "ssh-ed25519 AAAA"});
-        let organizations = set_fleet_fields(&Api::with_token(&fake.url, "t"), 7, &values).unwrap();
-        assert_eq!(organizations, vec![3, 5]);
+        set_fleet_fields(&Api::with_token(&fake.url, "t"), &ninja(), &values).unwrap();
         assert_eq!(
             fake.requests_to("PATCH", "/v2/organization/3/custom-fields"),
-            vec![values.clone()]
-        );
-        assert_eq!(
-            fake.requests_to("PATCH", "/v2/organization/5/custom-fields"),
             vec![values]
         );
         assert!(
-            fake.requests_to("PATCH", "/v2/organization/4/custom-fields")
+            fake.requests_to("PATCH", "/v2/organization/5/custom-fields")
                 .is_empty()
         );
     }
 
     #[test]
+    fn another_organizations_device_on_the_pos_policy_is_never_listed_written_or_run() {
+        let fake = tenant();
+        let api = Api::with_token(&fake.url, "t");
+        let names: Vec<String> = pos_devices(&api, &ninja())
+            .unwrap()
+            .into_iter()
+            .filter_map(|device| device.display_name)
+            .collect();
+        assert_eq!(names, ["POS 000 Test", "POS 001", "POS 900"]);
+        assert!(find_pos(&api, &ninja(), "POS 950").is_err());
+        point_relay(
+            &api,
+            &ninja(),
+            "relay.example.com:2222",
+            "ssh-ed25519 AAAA",
+            None,
+        )
+        .unwrap();
+        // Neither the tenant-wide list nor anything of organization 5 is ever asked for.
+        for (method, path) in [
+            ("GET", "/v2/devices?pageSize=1000"),
+            ("GET", "/v2/organization/5/devices?pageSize=1000"),
+            ("PATCH", "/v2/organization/5/custom-fields"),
+            ("POST", "/v2/device/9/script/run"),
+        ] {
+            assert!(fake.requests_to(method, path).is_empty(), "{method} {path}");
+        }
+    }
+
+    #[test]
     fn find_pos_matches_one_pos_exactly() {
-        let fake = Fake::start(|_, _, _| {
-            let mut all = devices();
+        let fake = Fake::start(|_, path, _| {
+            let mut all = devices(path);
             let list = all.as_array_mut().unwrap();
             list.push(
                 json!({"id": 5, "displayName": "POS 001", "organizationId": 3, "rolePolicyId": 7}),
@@ -427,9 +447,9 @@ mod tests {
             (200, all)
         });
         let api = Api::with_token(&fake.url, "t");
-        assert_eq!(find_pos(&api, 7, "POS 000 Test").unwrap().id, 1);
-        assert_eq!(find_pos(&api, 7, "POS 900").unwrap().id, 4);
-        let error = |name| find_pos(&api, 7, name).unwrap_err().to_string();
+        assert_eq!(find_pos(&api, &ninja(), "POS 000 Test").unwrap().id, 1);
+        assert_eq!(find_pos(&api, &ninja(), "POS 900").unwrap().id, 4);
+        let error = |name| find_pos(&api, &ninja(), name).unwrap_err().to_string();
         assert!(
             error("POS 001").contains("device IDs 2, 5"),
             "{}",
@@ -462,7 +482,6 @@ mod tests {
         assert_eq!(
             pointed,
             Pointed {
-                organizations: vec![3, 5],
                 ran: vec!["POS 000 Test".into(), "POS 900".into()],
                 offline: vec!["POS 001".into()],
                 failed: vec![],
@@ -511,8 +530,8 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_fleet_field_write_names_the_organizations_already_written() {
-        let fake = tenant_refusing(Some("/v2/organization/5/custom-fields"));
+    fn a_refused_fleet_field_write_installs_nothing() {
+        let fake = tenant_refusing(Some("/v2/organization/3/custom-fields"));
         let error = point_relay(
             &Api::with_token(&fake.url, "t"),
             &ninja(),
@@ -520,18 +539,16 @@ mod tests {
             "ssh-ed25519 AAAA",
             None,
         )
-        .unwrap_err();
-        let error = format!("{error:#}");
+        .unwrap_err()
+        .to_string();
         assert!(
-            error.contains("written on organizations [3] of {3, 5}")
-                && error.contains("/v2/organization/5/custom-fields failed (500)"),
+            error.contains("/v2/organization/3/custom-fields failed (500)"),
             "{error}"
         );
-        // Nothing is installed against fields that are only partly written.
-        assert!(
-            fake.requests_to("POST", "/v2/device/1/script/run")
-                .is_empty()
-        );
+        for id in [1, 4] {
+            let path = format!("/v2/device/{id}/script/run");
+            assert!(fake.requests_to("POST", &path).is_empty());
+        }
     }
 
     #[test]
@@ -570,10 +587,11 @@ mod tests {
             .unwrap_err()
             .to_string();
             assert!(error.contains(expected), "{error}");
-            for org in [3, 5] {
-                let path = format!("/v2/organization/{org}/custom-fields");
-                assert!(fake.requests_to("PATCH", &path).is_empty(), "{device}");
-            }
+            assert!(
+                fake.requests_to("PATCH", "/v2/organization/3/custom-fields")
+                    .is_empty(),
+                "{device}"
+            );
             for id in 1..=4 {
                 let path = format!("/v2/device/{id}/script/run");
                 assert!(fake.requests_to("POST", &path).is_empty(), "{device}");

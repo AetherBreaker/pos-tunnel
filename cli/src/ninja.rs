@@ -338,15 +338,18 @@ impl Api {
             .with_context(|| format!("NinjaOne GET {path}: unexpected reply: {}", snippet(&text)))
     }
 
-    /// Every device, a page at a time (`after` is the last device ID of the previous page).
-    pub fn devices(&self) -> Result<Vec<Device>> {
+    /// Every device of one organization, a page at a time (`after` is the last device ID of the
+    /// previous page). The tenant-wide list is never asked for (design section 8).
+    pub fn devices(&self, organization: i64) -> Result<Vec<Device>> {
         let mut devices: Vec<Device> = Vec::new();
         loop {
             let after = devices
                 .last()
                 .map(|d| format!("&after={}", d.id))
                 .unwrap_or_default();
-            let page: Vec<Device> = self.get(&format!("/v2/devices?pageSize=1000{after}"))?;
+            let page: Vec<Device> = self.get(&format!(
+                "/v2/organization/{organization}/devices?pageSize=1000{after}"
+            ))?;
             let done = page.len() < 1000;
             devices.extend(page);
             if done {
@@ -503,10 +506,10 @@ mod tests {
     fn devices_are_read_a_page_at_a_time() {
         let fake = crate::fake::Fake::start(|_, path, _| {
             let page: Vec<Value> = match path {
-                "/v2/devices?pageSize=1000" => (1..=1000)
+                "/v2/organization/3/devices?pageSize=1000" => (1..=1000)
                     .map(|id| json!({"id": id, "organizationId": 3}))
                     .collect(),
-                "/v2/devices?pageSize=1000&after=1000" => {
+                "/v2/organization/3/devices?pageSize=1000&after=1000" => {
                     vec![json!({"id": 1001, "organizationId": 3})]
                 }
                 _ => vec![],
@@ -514,17 +517,17 @@ mod tests {
             (200, Value::Array(page))
         });
         assert_eq!(
-            Api::with_token(&fake.url, "t").devices().unwrap().len(),
+            Api::with_token(&fake.url, "t").devices(3).unwrap().len(),
             1001
         );
         // The second page starts after the first page's last device, and there is no third.
         assert_eq!(
-            fake.requests_to("GET", "/v2/devices?pageSize=1000&after=1000")
+            fake.requests_to("GET", "/v2/organization/3/devices?pageSize=1000&after=1000")
                 .len(),
             1
         );
         assert!(
-            fake.requests_to("GET", "/v2/devices?pageSize=1000&after=1001")
+            fake.requests_to("GET", "/v2/organization/3/devices?pageSize=1000&after=1001")
                 .is_empty()
         );
     }

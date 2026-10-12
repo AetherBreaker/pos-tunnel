@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use posctl::admin::{self, ALLOWED_SIGNERS, Operators};
 use posctl::bundle::Bundle;
 use posctl::config::{Config, NinjaOne, Relay, parse_host_port};
-use posctl::ninja::{self, Api};
+use posctl::ninja::{self, Api, Named};
 use posctl::{fleet, keys};
 use serde_json::json;
 
@@ -24,8 +24,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up this workstation as the admin's: sign in to NinjaOne, find the POS policy and the two
-    /// library scripts by name, write the posctl config, and list the admin as an operator.
+    /// Set up this workstation as the admin's: sign in to NinjaOne, find the organization, the POS
+    /// policy and the two library scripts by name, write the posctl config, and list the admin as an
+    /// operator.
     Init {
         /// `https://<region>.ninjarmm.com`.
         #[arg(long)]
@@ -33,7 +34,11 @@ enum Command {
         /// The client ID of the tenant's Native client app.
         #[arg(long)]
         client_id: String,
-        /// The exact name of the NinjaOne policy whose devices are the POSes.
+        /// The exact name of the one NinjaOne organization this system works on: only its devices are
+        /// listed, and only its fleet fields are written.
+        #[arg(long)]
+        organization: String,
+        /// The exact name of the NinjaOne policy that makes a device of that organization a POS.
         #[arg(long)]
         policy: String,
         /// The admin's operator private key (made by hand, its public key built into posctl-admin).
@@ -59,12 +64,12 @@ enum RelayCommand {
         /// `<host>[:<port>]`, port 2222 if omitted.
         address: String,
     },
-    /// Point the fleet at the relay: write the fleet relay fields, then run `Install-PosTunnel -Force` on
-    /// every online POS at once. Open sessions end.
+    /// Point the fleet at the relay: write the organization's fleet relay fields, then run
+    /// `Install-PosTunnel -Force` on every online POS at once. Open sessions end.
     Point {
         /// Run `Install-PosTunnel -Force` on this one POS only (its exact display name), to try a relay
-        /// on a test device first. The fleet fields are written either way; other POSes pick them up at
-        /// their next scheduled install.
+        /// on a test device first. The organization's relay changes either way: its other POSes pick it
+        /// up at their next scheduled install.
         #[arg(long, value_name = "DISPLAY_NAME")]
         device: Option<String>,
     },
@@ -101,6 +106,7 @@ fn main() -> Result<()> {
     if let Command::Init {
         base_url,
         client_id,
+        organization,
         policy,
         operator_key,
         name,
@@ -111,18 +117,26 @@ fn main() -> Result<()> {
         admin::check_operator_name(&name)?;
         ninja::login(base_url, &client_id)?;
         let api = Api::connect(base_url, &client_id)?;
-        let policies = api.policies()?;
-        let pos_policy_id = policies
-            .iter()
-            .find(|p| p.name == policy)
-            .with_context(|| {
-                let names: Vec<&str> = policies.iter().map(|p| p.name.as_str()).collect();
-                format!(
-                    "no NinjaOne policy named '{policy}'; there are: {}",
-                    names.join(", ")
-                )
-            })?
-            .id;
+        let named = |kind: &str, all: &[Named], wanted: &str| {
+            all.iter()
+                .find(|one| one.name == wanted)
+                .map(|one| one.id)
+                .with_context(|| {
+                    let names: Vec<&str> = all.iter().map(|one| one.name.as_str()).collect();
+                    format!(
+                        "no NinjaOne {kind} named '{wanted}'; there are: {}",
+                        names.join(", ")
+                    )
+                })
+        };
+        // By name, refused when absent: an organization ID that doesn't exist lists no devices instead
+        // of failing (design section 11).
+        let organization_id = named(
+            "organization",
+            &api.get::<Vec<Named>>("/v2/organizations")?,
+            &organization,
+        )?;
+        let pos_policy_id = named("policy", &api.policies()?, &policy)?;
         let scripts = api.scripts()?;
         let script = |wanted: &str| {
             scripts
@@ -134,6 +148,7 @@ fn main() -> Result<()> {
         let ninjaone = NinjaOne {
             base_url: base_url.to_owned(),
             client_id,
+            organization_id,
             pos_policy_id,
             install_script_id: script("Install-PosTunnel")?,
             invoke_script_id: script("Invoke-PosTunnel")?,
@@ -152,7 +167,7 @@ fn main() -> Result<()> {
             .insert(name.clone(), keys::public_of_file(&operator_key)?);
         operators.save()?;
         println!(
-            "posctl is set up for {name}, policy '{policy}' (id {pos_policy_id}). Next: `posctl-admin relay keygen <host>`."
+            "posctl is set up for {name}: organization '{organization}' (id {organization_id}), policy '{policy}' (id {pos_policy_id}). Next: `posctl-admin relay keygen <host>`."
         );
         return Ok(());
     }
@@ -196,8 +211,8 @@ fn main() -> Result<()> {
             let pointed =
                 fleet::point_relay(&api, ninja, &address, &public_key, device.as_deref())?;
             println!(
-                "Fleet relay fields written on organizations {:?}.",
-                pointed.organizations
+                "Fleet relay fields written on organization {}.",
+                ninja.organization_id
             );
             if !pointed.ran.is_empty() {
                 println!(
@@ -264,12 +279,11 @@ fn main() -> Result<()> {
             };
             let ninja = &config.ninjaone;
             let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
-            let organizations = fleet::set_fleet_fields(
-                &api,
-                ninja.pos_policy_id,
-                &json!({"posTunnelSigner": public_key}),
-            )?;
-            println!("posTunnelSigner written on organizations {organizations:?}.");
+            fleet::set_fleet_fields(&api, ninja, &json!({"posTunnelSigner": public_key}))?;
+            println!(
+                "posTunnelSigner written on organization {}.",
+                ninja.organization_id
+            );
         }
         Command::Operator(command) => {
             let mut operators = Operators::load()?;
