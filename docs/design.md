@@ -63,9 +63,10 @@ port, and `tunnelctl` validates key strings strictly (section 6.3).
 
 **Fleet fields** (`posTunnelRelay` = `<host>:<port>`, `posTunnelRelayServerKey`, `posTunnelSigner`):
 definition scope Organization only; Automations read-only, API read/write. `posctl-admin` writes
-them on every organization that holds a POS (`PATCH /v2/organization/{id}/custom-fields`); a POS's
-`Ninja-Property-Get` resolves device → end user → location → organization, so it reads its
-organization's value. A POS that could write one would point the whole fleet at its own relay or
+them on the one organization this system works on (section 8) and no other
+(`PATCH /v2/organization/{id}/custom-fields`); a POS's `Ninja-Property-Get` resolves device → end
+user → location → organization, so it reads its organization's value. A POS that could write one
+would point the whole fleet at its own relay or
 signing key; two NinjaOne controls each prevent it: scripts can't update a field whose definition
 scope isn't Device, and Automations is read-only. Not NinjaOne Documentation fields, whose
 organization values script "delegate" devices can write.
@@ -501,10 +502,11 @@ the fleet); it keeps these commands out of `posctl --help`, so an agent working 
 doesn't come across them. Every command that produces relay configuration prints it as a `.env` line
 ready to paste into Coolify.
 
-- `init --base-url <url> --client-id <id> --policy <name> --operator-key <path> --name <name>`: signs
-  in to NinjaOne (as `login`), finds the POS policy and the two library scripts by exact name, writes
-  this workstation's `config.toml` (keeping a relay it already pins) and lists the admin as an
-  operator.
+- `init --base-url <url> --client-id <id> --organization <name> --policy <name> --operator-key <path>
+  --name <name>`: signs in to NinjaOne (as `login`), finds the organization, the POS policy and the
+  two library scripts by exact name, writes this workstation's `config.toml` (keeping a relay it
+  already pins) and lists the admin as an operator. That organization is the only one the system
+  then touches (section 8).
 - `relay keygen <host>[:<port>]`: generates a relay SSH server key pair, stores the private key in
   `posctl-admin`'s config dir, makes this workstation's `posctl` pin its public key at that address
   (port default 2222), and prints the `RELAY_SSH_PRIVATE_KEY=` line.
@@ -514,8 +516,10 @@ ready to paste into Coolify.
   end; offline POSes converge at their next daily run. Serves both rotating the relay's key pair and
   moving to a new relay; in either case the fleet is unreachable until it runs, so it never waits.
   Prints the `posctl relay set …` line for the other operators. `--device` runs the install on that
-  one POS only, to try a relay on a test device first; it is resolved before anything is written, so
-  a mistyped or offline one changes nothing. Order: `relay keygen`, paste the line into Coolify and
+  one POS only, to try a relay on a test device first. It limits the install, not the write: the
+  organization's relay fields change either way, so its other POSes follow at their next scheduled
+  install. It is resolved before anything is written, so a mistyped or offline one changes nothing.
+  Order: `relay keygen`, paste the line into Coolify and
   redeploy, then `relay point`. A POS NinjaOne refuses to start the install on is listed while the
   others still start; the command then fails, and running it again retries.
 - `signing keygen`: generates a passphrase-protected release signing key pair, stores the private key
@@ -537,17 +541,23 @@ ready to paste into Coolify.
 ## 8. Operator workstation
 
 - Config `posctl/config.toml` in the platform config dir (`POSCTL_CONFIG_HOME` overrides it): NinjaOne
-  API base URL (region-specific) and Native client ID, library script IDs for `Install-PosTunnel` and
-  `Invoke-PosTunnel`, and the POS policy ID (written by `posctl-admin init`); relay host, port and
-  public key (set by `relay keygen` on the admin's workstation, `operator import` or `relay set` on
-  others); operator private key path.
+  API base URL (region-specific) and Native client ID, the organization ID, the POS policy ID and the
+  library script IDs for `Install-PosTunnel` and `Invoke-PosTunnel` (written by `posctl-admin init`);
+  relay host, port and public key (set by `relay keygen` on the admin's workstation,
+  `operator import` or `relay set` on others); operator private key path.
+- One organization: the system works on a single NinjaOne organization, named at `init`. Only its
+  devices are listed and only its fleet fields written; nothing of another organization is read or
+  changed. What stays tenant-wide is what NinjaOne scopes no narrower: the six custom field
+  definitions (their values are per organization) and `init`'s lookups by name.
 - NinjaOne API (OAuth authorization code with PKCE through the tenant's Native client app, no client
   secret; scopes `monitoring` to read, `management` to run scripts and write fields,
   `offline_access` for the refresh token, which `login` keeps and each command trades for an access
   token; base URL `app`, `us2`, `eu`, `ca` or `oc` `.ninjarmm.com`):
-  - `GET /v2/devices`: `displayName`, `offline`, `policyId` (an override) else `rolePolicyId`. A POS
-    is a device whose effective policy is the POS policy. The device filter has no policy term, so
-    `posctl` filters client-side; this defines "every POS" and limits `connect`'s name match.
+  - `GET /v2/organization/{id}/devices`: `displayName`, `offline`, `policyId` (an override) else
+    `rolePolicyId`. A POS is a device of the organization whose effective policy is the POS policy.
+    The device filter has no policy term, so `posctl` filters client-side; this defines "every POS"
+    and limits `connect`'s name match. The tenant-wide `GET /v2/devices` is never used.
+  - `GET /v2/organizations`: `init` resolves the organization's name to its ID.
   - `GET /v2/device/{id}/custom-fields`: the device fields.
   - `POST /v2/device/{id}/script/run` with `type: SCRIPT`, the library script `id`, `runAs: system`
     and `parameters`: one string NinjaOne passes to the script's `param` block (strings only;
@@ -657,7 +667,10 @@ token. Reads
 `message`. `GET /v2/devices` returns `rolePolicyId` and no `policyId` key (no device in the tenant has
 an override). Creating a custom field (`POST /v2/custom-fields`) needs the deprecated `scope`
 (`NODE_GLOBAL` for a global field) beside `definitionScope`, and NinjaOne stores the definition scope
-and permissions as sent (`posctl-admin` created the six). Still open:
+and permissions as sent (`posctl-admin` created the six). `GET /v2/organization/{id}/devices` returns
+the same device objects as `GET /v2/devices`, with the same `pageSize` and `after` paging; for an ID
+that doesn't exist it returns an empty list, not an error, which is why `init` takes the
+organization by name. Still open:
 
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).

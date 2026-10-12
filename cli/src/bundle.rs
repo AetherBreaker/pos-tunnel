@@ -46,6 +46,7 @@ mod tests {
                 ninjaone: NinjaOne {
                     base_url: "https://us2.ninjarmm.com".into(),
                     client_id: "id".into(),
+                    organization_id: 3,
                     pos_policy_id: 7,
                     install_script_id: 93,
                     invoke_script_id: 94,

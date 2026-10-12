@@ -25,7 +25,10 @@ pub struct NinjaOne {
     pub base_url: String,
     /// The tenant's Native client app: PKCE, no secret (design section 11).
     pub client_id: String,
-    /// A device whose effective policy is this one is a POS (design section 8).
+    /// The one organization this system works on: only its devices are listed, only its fleet fields
+    /// written (design section 8).
+    pub organization_id: i64,
+    /// A device of that organization whose effective policy is this one is a POS.
     pub pos_policy_id: i64,
     pub install_script_id: i64,
     pub invoke_script_id: i64,
@@ -152,6 +155,7 @@ mod tests {
             ninjaone: NinjaOne {
                 base_url: "https://us2.ninjarmm.com".into(),
                 client_id: "abc".into(),
+                organization_id: 3,
                 pos_policy_id: 7,
                 install_script_id: 93,
                 invoke_script_id: 94,
