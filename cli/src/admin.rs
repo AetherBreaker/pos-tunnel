@@ -55,7 +55,7 @@ pub const GITHUB_RAW: &str = "https://raw.githubusercontent.com/AetherBreaker/po
 /// The signing public key in `ALLOWED_SIGNERS` at the release tag `tag`, fetched from the repository on
 /// GitHub (`raw` is `GITHUB_RAW` outside tests). No checkout or local repository is read: a branch, a
 /// stale tree or an uncommitted edit can't become what the fleet trusts. Under `refs/tags/` GitHub
-/// answers 404 for a branch or a commit (design section 7.9).
+/// answers 404 for a branch, a commit or a missing tag (design section 7.9).
 pub fn signer_at_tag(raw: &str, tag: &str) -> Result<String> {
     // The tag goes into a URL path; nothing that could leave `refs/tags/` is sent.
     if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -71,15 +71,30 @@ pub fn signer_at_tag(raw: &str, tag: &str) -> Result<String> {
         .get(&url)
         .call()
         .with_context(|| format!("fetching {url}"))?;
-    let status = response.status().as_u16();
-    if status != 200 {
-        bail!("GitHub has no {ALLOWED_SIGNERS} at tag '{tag}' ({status} from {url})");
+    match response.status().as_u16() {
+        200 => {}
+        404 => bail!("GitHub has no {ALLOWED_SIGNERS} at tag '{tag}' (404 from {url})"),
+        status => bail!("GitHub answered {status} for {url}"),
     }
     let text = response.body_mut().read_to_string()?;
-    let key = text
+    // One signer a line, `#` starting a comment; this system has exactly one signer.
+    let signers: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let [signer] = signers.as_slice() else {
+        bail!(
+            "{ALLOWED_SIGNERS} at tag '{tag}' holds {} signers; there must be exactly one",
+            signers.len()
+        );
+    };
+    let key = signer
         .split_once("ssh-ed25519")
         .map(|(_, rest)| format!("ssh-ed25519{rest}"))
-        .with_context(|| format!("no ed25519 key in {ALLOWED_SIGNERS} at tag '{tag}'"))?;
+        .with_context(|| {
+            format!("the signer in {ALLOWED_SIGNERS} at tag '{tag}' has no ed25519 key")
+        })?;
     keys::parse_public(&key)
 }
 
@@ -250,6 +265,30 @@ mod tests {
                 error.contains("is not a release tag"),
                 "{not_a_tag}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn the_signer_file_must_hold_exactly_one_signer() {
+        let key = keys::public_line(keys::generate("").unwrap().public_key()).unwrap();
+        let one = format!(
+            "# ssh-ed25519 AAAA an old key, in a comment\n\npos-tunnel-release namespaces=\"pos-tunnel-release\" {key} release\n"
+        );
+        let two = format!("{one}second namespaces=\"pos-tunnel-release\" {key}\n");
+        let fake = crate::fake::Fake::start(move |_, path, _| match path {
+            "/refs/tags/one/pos/allowed_signers" => (200, one.as_str().into()),
+            "/refs/tags/two/pos/allowed_signers" => (200, two.as_str().into()),
+            "/refs/tags/none/pos/allowed_signers" => (200, "# only a comment\n".into()),
+            _ => (503, "busy".into()),
+        });
+        assert_eq!(signer_at_tag(&fake.url, "one").unwrap(), key);
+        for (tag, expected) in [
+            ("two", "holds 2 signers"),
+            ("none", "holds 0 signers"),
+            ("v9", "GitHub answered 503"),
+        ] {
+            let error = signer_at_tag(&fake.url, tag).unwrap_err().to_string();
+            assert!(error.contains(expected), "{tag}: {error}");
         }
     }
 }

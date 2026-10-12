@@ -136,7 +136,11 @@ pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
     Ok(api
         .devices(ninja.organization_id)?
         .into_iter()
-        .filter(|device| device.effective_policy() == Some(ninja.pos_policy_id))
+        // The organization's list should hold nothing else; a stray device is still not a POS.
+        .filter(|device| {
+            device.organization_id == ninja.organization_id
+                && device.effective_policy() == Some(ninja.pos_policy_id)
+        })
         .collect())
 }
 
@@ -272,11 +276,14 @@ mod tests {
             .strip_prefix("/v2/organization/")
             .and_then(|rest| rest.split('/').next())
             .and_then(|id| id.parse::<i64>().ok());
-        if let Some(organization) = organization {
-            all.as_array_mut()
-                .unwrap()
-                .retain(|device| device["organizationId"] == organization);
-        }
+        // Paged as NinjaOne pages: only the devices after the one `after` names.
+        let after = path
+            .split_once("&after=")
+            .map_or(0, |(_, id)| id.parse::<i64>().unwrap());
+        all.as_array_mut().unwrap().retain(|device| {
+            device["id"].as_i64() > Some(after)
+                && organization.is_none_or(|organization| device["organizationId"] == organization)
+        });
         all
     }
 
@@ -397,6 +404,18 @@ mod tests {
     }
 
     #[test]
+    fn a_device_of_another_organization_in_the_list_is_not_a_pos() {
+        // A server that lists the whole tenant whatever organization is asked for.
+        let fake = Fake::start(|_, path, _| (200, devices(&path.replace("/organization/3", ""))));
+        let names: Vec<String> = pos_devices(&Api::with_token(&fake.url, "t"), &ninja())
+            .unwrap()
+            .into_iter()
+            .filter_map(|device| device.display_name)
+            .collect();
+        assert_eq!(names, ["POS 000 Test", "POS 001", "POS 900"]);
+    }
+
+    #[test]
     fn fleet_fields_are_written_on_the_one_organization() {
         let fake = tenant();
         let values = json!({"posTunnelSigner": "ssh-ed25519 AAAA"});
@@ -445,11 +464,11 @@ mod tests {
     fn find_pos_matches_one_pos_exactly() {
         let fake = Fake::start(|_, path, _| {
             let mut all = devices(path);
-            let list = all.as_array_mut().unwrap();
-            list.push(
-                json!({"id": 5, "displayName": "POS 001", "organizationId": 3, "rolePolicyId": 7}),
-            );
-            list.push(json!({"id": 6, "displayName": "pos 000 test", "organizationId": 3, "rolePolicyId": 8}));
+            if !path.contains("&after=") {
+                let list = all.as_array_mut().unwrap();
+                list.push(json!({"id": 5, "displayName": "POS 001", "organizationId": 3, "rolePolicyId": 7}));
+                list.push(json!({"id": 6, "displayName": "pos 000 test", "organizationId": 3, "rolePolicyId": 8}));
+            }
             (200, all)
         });
         let api = Api::with_token(&fake.url, "t");

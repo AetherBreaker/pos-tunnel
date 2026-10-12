@@ -63,6 +63,10 @@ enum RelayCommand {
     Keygen {
         /// `<host>[:<port>]`, port 2222 if omitted.
         address: String,
+        /// Replace the relay private key this workstation already holds: a rotation, after which the
+        /// relay must be redeployed and the fleet pointed again.
+        #[arg(long)]
+        replace: bool,
     },
     /// Point the fleet at the relay: write the organization's fleet relay fields, then run
     /// `Install-PosTunnel -Force` on every online POS at once. Open sessions end.
@@ -79,7 +83,12 @@ enum RelayCommand {
 enum SigningCommand {
     /// Generate a release signing key pair (passphrase-protected), rewrite pos/allowed_signers and
     /// publish the public key. Run from a checkout of pos-tunnel; then re-sign and release.
-    Keygen,
+    Keygen {
+        /// Replace the signing private key this workstation already holds; POSes then refuse releases
+        /// until one is signed with the new key.
+        #[arg(long)]
+        replace: bool,
+    },
     /// Publish the signing public key a release was made with to the posTunnelSigner fleet field: the
     /// one in pos/allowed_signers at that release's git tag, fetched from GitHub. No checkout is read.
     Publish {
@@ -114,7 +123,12 @@ fn main() -> Result<()> {
     {
         let base_url = base_url.trim_end_matches('/');
         admin::require_admin(&operator_key)?;
-        admin::check_operator_name(&name)?;
+        // The admin's key appears once: a rerun under another name renames the admin, and `add`
+        // refuses a name another operator holds. Before the sign-in, so a taken name costs nothing.
+        let mut operators = Operators::load()?;
+        let admin_key = keys::public_of_file(&operator_key)?;
+        operators.operators.retain(|_, key| *key != admin_key);
+        operators.add(&name, admin_key)?;
         ninja::login(base_url, &client_id)?;
         let api = Api::connect(base_url, &client_id)?;
         let named = |kind: &str, all: &[Named], wanted: &str| {
@@ -175,10 +189,6 @@ fn main() -> Result<()> {
             relay,
         }
         .save()?;
-        let mut operators = Operators::load()?;
-        operators
-            .operators
-            .insert(name.clone(), keys::public_of_file(&operator_key)?);
         operators.save()?;
         println!(
             "posctl is set up for {name}: organization '{organization}' (id {organization_id}), policy '{policy}' (id {pos_policy_id}). {next}"
@@ -189,11 +199,19 @@ fn main() -> Result<()> {
     admin::require_admin(&config.operator_key)?;
     match command {
         Command::Init { .. } => unreachable!("handled above"),
-        Command::Relay(RelayCommand::Keygen { address }) => {
+        Command::Relay(RelayCommand::Keygen { address, replace }) => {
             let (host, port) = parse_host_port(&address)?;
+            let path = admin::relay_key_path()?;
+            // The live relay serves the key already here; a second run must be meant as a rotation.
+            if path.exists() && !replace {
+                bail!(
+                    "a relay private key already exists at {}; `relay keygen --replace` rotates it (redeploy the relay, then `relay point` again)",
+                    path.display()
+                );
+            }
             let key = keys::generate("pos-tunnel relay")?;
             let text = keys::private_text(&key, None)?;
-            keys::write_private_key(&admin::relay_key_path()?, &key, None)?;
+            keys::write_private_key(&path, &key, None)?;
             config.relay = Some(Relay {
                 host,
                 port,
@@ -215,8 +233,10 @@ fn main() -> Result<()> {
             let public_key = keys::public_of_file(&admin::relay_key_path()?)?;
             if public_key != relay.public_key {
                 bail!(
-                    "the posctl config pins a different relay key than {}; run `relay keygen` again",
-                    admin::relay_key_path()?.display()
+                    "the posctl config pins a different relay key than {}; `posctl relay set {}:{} {public_key}` pins that file's key again (`relay keygen --replace` would rotate it instead)",
+                    admin::relay_key_path()?.display(),
+                    relay.host,
+                    relay.port
                 );
             }
             let ninja = &config.ninjaone;
@@ -247,17 +267,28 @@ fn main() -> Result<()> {
             }
             if !pointed.failed.is_empty() {
                 bail!(
-                    "NinjaOne refused to start Install-PosTunnel -Force on the POSes below; run `relay point` again to retry:\n{}",
+                    "Install-PosTunnel -Force did not start on the POSes below (NinjaOne refused it or didn't answer); retry one with `relay point --device <name>`, or all with `relay point`, which also ends sessions opened since:\n{}",
                     pointed.failed.join("\n")
                 );
             }
         }
         Command::Signing(command) => {
+            // Signed in before anything local changes: an expired sign-in must not leave a new key on
+            // disk that the fleet never got.
+            let ninja = &config.ninjaone;
+            let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
             let public_key = match command {
-                SigningCommand::Keygen => {
+                SigningCommand::Keygen { replace } => {
                     if !Path::new(ALLOWED_SIGNERS).exists() {
                         bail!(
                             "run this from a checkout of pos-tunnel: it rewrites {ALLOWED_SIGNERS}"
+                        );
+                    }
+                    let path = admin::signing_key_path()?;
+                    if path.exists() && !replace {
+                        bail!(
+                            "a release signing private key already exists at {}; `signing keygen --replace` makes a new one",
+                            path.display()
                         );
                     }
                     let passphrase =
@@ -267,7 +298,6 @@ fn main() -> Result<()> {
                         bail!("the passphrases are empty or don't match");
                     }
                     let key = keys::generate(SIGNING_NAMESPACE)?;
-                    let path = admin::signing_key_path()?;
                     keys::write_private_key(&path, &key, Some(&passphrase))?;
                     let public_key = keys::public_line(key.public_key())?;
                     fs::write(
@@ -291,9 +321,9 @@ fn main() -> Result<()> {
                     public_key
                 }
             };
-            let ninja = &config.ninjaone;
-            let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
-            fleet::set_fleet_fields(&api, ninja, &json!({"posTunnelSigner": public_key}))?;
+            fleet::set_fleet_fields(&api, ninja, &json!({"posTunnelSigner": public_key})).context(
+                "posTunnelSigner was not written; once a release carries this key, `posctl-admin signing publish <tag>` writes it",
+            )?;
             println!(
                 "posTunnelSigner written on organization {}.",
                 ninja.organization_id

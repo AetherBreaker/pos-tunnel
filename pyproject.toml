@@ -4,7 +4,7 @@
   description     = "On-demand SSH access to NinjaOne-managed Windows POS machines through a hardened relay"
   readme          = "README.md"
   requires-python = ">=3.14"
-  # The wheel carries only the Rust `posctl` binary (maturin `bindings = "bin"`); no Python code.
+  # The wheel carries only the Rust `posctl` and `posctl-admin` binaries (maturin `bindings = "bin"`); no Python code.
   dependencies    = []
 
 [dependency-groups]

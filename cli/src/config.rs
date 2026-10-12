@@ -64,7 +64,12 @@ impl Config {
             )
         })?;
         toml::from_str(&text)
-            .with_context(|| format!("{} is not a valid posctl config", path.display()))
+            .with_context(|| {
+                format!(
+                    "{} is not a config this posctl can read: the admin runs `posctl-admin init` again, an operator imports a new bundle (`posctl operator import`)",
+                    path.display()
+                )
+            })
     }
 
     pub fn save(&self) -> Result<()> {
