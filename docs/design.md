@@ -516,7 +516,8 @@ ready to paste into Coolify.
   Prints the `posctl relay set …` line for the other operators. `--device` runs the install on that
   one POS only, to try a relay on a test device first; it is resolved before anything is written, so
   a mistyped or offline one changes nothing. Order: `relay keygen`, paste the line into Coolify and
-  redeploy, then `relay point`.
+  redeploy, then `relay point`. A POS NinjaOne refuses to start the install on is listed while the
+  others still start; the command then fails, and running it again retries.
 - `signing keygen`: generates a passphrase-protected release signing key pair, stores the private key
   in `posctl-admin`'s config dir, rewrites `pos/allowed_signers` (run from a checkout of this repo),
   and writes the public key to `posTunnelSigner` at once. Then point `POS_TUNNEL_SIGNING_KEY` at it,

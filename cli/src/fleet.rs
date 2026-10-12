@@ -191,10 +191,14 @@ pub fn set_fleet_fields(api: &Api, pos_policy: i64, values: &Value) -> Result<Ve
             "no device has the POS policy, so there is no organization to write the fleet fields on"
         );
     }
+    let mut written = Vec::new();
     for &organization in &organizations {
-        api.set_organization_fields(organization, values)?;
+        api.set_organization_fields(organization, values).with_context(|| {
+            format!("the fields were written on organizations {written:?} of {organizations:?} before this failed")
+        })?;
+        written.push(organization);
     }
-    Ok(organizations.into_iter().collect())
+    Ok(written)
 }
 
 /// What `relay point` did.
@@ -206,6 +210,8 @@ pub struct Pointed {
     pub ran: Vec<String>,
     /// The offline POSes skipped; they converge at their next scheduled install.
     pub offline: Vec<String>,
+    /// The POSes NinjaOne refused to start it on, each with its reason.
+    pub failed: Vec<String>,
 }
 
 /// `posctl-admin relay point`: writes the fleet relay fields, then starts `Install-PosTunnel -Force` on
@@ -235,7 +241,7 @@ pub fn point_relay(
         Some(target) => vec![target],
         None => pos_devices(api, ninja.pos_policy_id)?,
     };
-    let (mut ran, mut offline) = (Vec::new(), Vec::new());
+    let (mut ran, mut offline, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for device in targets {
         let name = device
             .display_name
@@ -244,14 +250,19 @@ pub fn point_relay(
         if device.offline {
             offline.push(name);
         } else {
-            api.run_script(device.id, ninja.install_script_id, "-Force")?;
-            ran.push(name);
+            // A refused run must not stop the rest: the POSes after it would stay on the old relay,
+            // unreachable (design section 7.9), with nothing saying which ones.
+            match api.run_script(device.id, ninja.install_script_id, "-Force") {
+                Ok(()) => ran.push(name),
+                Err(e) => failed.push(format!("{name}: {e:#}")),
+            }
         }
     }
     Ok(Pointed {
         organizations,
         ran,
         offline,
+        failed,
     })
 }
 
@@ -269,9 +280,10 @@ mod tests {
         ])
     }
 
-    /// A tenant whose six fields already exist as they should, with `devices()`; it accepts every write.
-    fn tenant() -> Fake {
-        Fake::start(|method, path, _| {
+    /// A tenant whose six fields already exist as they should, with `devices()`; it accepts every write
+    /// but one to `refused`, which gets a 500.
+    fn tenant_refusing(refused: Option<&'static str>) -> Fake {
+        Fake::start(move |method, path, _| {
             let field = path.strip_prefix("/v2/custom-fields/field-name/");
             match (
                 method,
@@ -283,9 +295,14 @@ mod tests {
                     (200, definition)
                 }
                 ("GET", None) => (200, devices()),
+                _ if refused == Some(path) => (500, json!({"resultCode": "FAILURE"})),
                 _ => (204, Value::Null),
             }
         })
+    }
+
+    fn tenant() -> Fake {
+        tenant_refusing(None)
     }
 
     fn ninja() -> NinjaOne {
@@ -448,6 +465,7 @@ mod tests {
                 organizations: vec![3, 5],
                 ran: vec!["POS 000 Test".into(), "POS 900".into()],
                 offline: vec!["POS 001".into()],
+                failed: vec![],
             }
         );
         let fields = json!({"posTunnelRelay": "relay.example.com:2222", "posTunnelRelayServerKey": "ssh-ed25519 AAAA"});
@@ -466,6 +484,52 @@ mod tests {
         );
         assert!(
             fake.requests_to("POST", "/v2/device/2/script/run")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn point_relay_goes_on_past_a_refused_script_run_and_reports_it() {
+        let fake = tenant_refusing(Some("/v2/device/1/script/run"));
+        let pointed = point_relay(
+            &Api::with_token(&fake.url, "t"),
+            &ninja(),
+            "relay.example.com:2222",
+            "ssh-ed25519 AAAA",
+            None,
+        )
+        .unwrap();
+        assert_eq!(pointed.ran, vec!["POS 900"]);
+        assert_eq!(pointed.offline, vec!["POS 001"]);
+        assert_eq!(pointed.failed.len(), 1, "{:?}", pointed.failed);
+        assert!(
+            pointed.failed[0]
+                .starts_with("POS 000 Test: NinjaOne POST /v2/device/1/script/run failed (500)"),
+            "{:?}",
+            pointed.failed
+        );
+    }
+
+    #[test]
+    fn a_refused_fleet_field_write_names_the_organizations_already_written() {
+        let fake = tenant_refusing(Some("/v2/organization/5/custom-fields"));
+        let error = point_relay(
+            &Api::with_token(&fake.url, "t"),
+            &ninja(),
+            "relay.example.com:2222",
+            "ssh-ed25519 AAAA",
+            None,
+        )
+        .unwrap_err();
+        let error = format!("{error:#}");
+        assert!(
+            error.contains("written on organizations [3] of {3, 5}")
+                && error.contains("/v2/organization/5/custom-fields failed (500)"),
+            "{error}"
+        );
+        // Nothing is installed against fields that are only partly written.
+        assert!(
+            fake.requests_to("POST", "/v2/device/1/script/run")
                 .is_empty()
         );
     }

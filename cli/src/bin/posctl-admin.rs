@@ -196,10 +196,12 @@ fn main() -> Result<()> {
                 "Fleet relay fields written on organizations {:?}.",
                 pointed.organizations
             );
-            println!(
-                "Install-PosTunnel -Force started on: {}",
-                pointed.ran.join(", ")
-            );
+            if !pointed.ran.is_empty() {
+                println!(
+                    "Install-PosTunnel -Force started on: {}",
+                    pointed.ran.join(", ")
+                );
+            }
             if !pointed.offline.is_empty() {
                 println!(
                     "Offline, converging at their next scheduled install: {}",
@@ -209,6 +211,12 @@ fn main() -> Result<()> {
             if device.is_none() {
                 println!(
                     "Send the other operators this line:\nposctl relay set {address} {public_key}"
+                );
+            }
+            if !pointed.failed.is_empty() {
+                bail!(
+                    "NinjaOne refused to start Install-PosTunnel -Force on the POSes below; run `relay point` again to retry:\n{}",
+                    pointed.failed.join("\n")
                 );
             }
         }
