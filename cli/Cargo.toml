@@ -12,6 +12,10 @@ path = "src/lib.rs"
 name = "posctl"
 path = "src/bin/posctl.rs"
 
+[[bin]]
+name = "posctl-admin"
+path = "src/bin/posctl-admin.rs"
+
 [dependencies]
 anyhow = "1"
 base64 = "0.23.1"
