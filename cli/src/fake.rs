@@ -53,10 +53,11 @@ impl Fake {
                 let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let (status, reply) = handler(&method, &path, &body);
                 log.lock().unwrap().push((method, path, body));
-                let text = if reply.is_null() {
-                    String::new()
-                } else {
-                    reply.to_string()
+                let text = match &reply {
+                    Value::Null => String::new(),
+                    // A string is a plain-text body, as GitHub's raw file host sends.
+                    Value::String(text) => text.clone(),
+                    _ => reply.to_string(),
                 };
                 let _ = write!(
                     stream,

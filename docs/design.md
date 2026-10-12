@@ -527,8 +527,9 @@ ready to paste into Coolify.
   and writes the public key to `posTunnelSigner` at once. Then point `POS_TUNNEL_SIGNING_KEY` at it,
   re-sign and release: until a release signed with the new key exists, POSes reject new releases and
   keep their installed version. `signing publish <tag>` writes the key a release was made with, the one
-  in `pos/allowed_signers` at that release's git tag, read from the repository whatever is checked out,
-  and prints the tag and the key; anything but a tag is refused.
+  in `pos/allowed_signers` at that release's git tag, fetched from the repository on GitHub; no checkout
+  or local repository is read. GitHub's raw file host under `refs/tags/<tag>/` answers 404 for a branch
+  or a missing tag, so only a tag is accepted. It prints the tag and the key before writing.
 - `operator add <name>`, `operator remove <name>`, `operator list`: `add` generates an operator key
   pair and prints, once, a single-line bundle for the new operator's `posctl operator import`: base64
   of a small TOML document holding the operator private key and the admin's `config.toml` (NinjaOne

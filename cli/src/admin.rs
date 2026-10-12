@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -49,23 +48,34 @@ pub fn signing_key_path() -> Result<PathBuf> {
 /// Where the repository keeps the release signing public key, in `ssh-keygen -Y verify`'s format.
 pub const ALLOWED_SIGNERS: &str = "pos/allowed_signers";
 
-/// The signing public key in `ALLOWED_SIGNERS` at the release tag `tag` of the repository at `repo`,
-/// read from git and never from the checkout: a branch, a stale tree or an uncommitted edit can't
-/// become what the fleet trusts. `refs/tags/` makes git refuse a branch or commit by that name.
-pub fn signer_at_tag(repo: &Path, tag: &str) -> Result<String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["show", &format!("refs/tags/{tag}:{ALLOWED_SIGNERS}")])
-        .output()
-        .context("running git")?;
-    if !out.status.success() {
-        bail!(
-            "git has no {ALLOWED_SIGNERS} at tag '{tag}' (run this in a clone of pos-tunnel, after `git fetch --tags` if the release was made elsewhere): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+/// Where GitHub serves this repository's files at a ref: the repository the POSes download releases
+/// from (`$ReleaseUrl` in `pos/ninja/Install-PosTunnel.ps1`).
+pub const GITHUB_RAW: &str = "https://raw.githubusercontent.com/AetherBreaker/pos-tunnel";
+
+/// The signing public key in `ALLOWED_SIGNERS` at the release tag `tag`, fetched from the repository on
+/// GitHub (`raw` is `GITHUB_RAW` outside tests). No checkout or local repository is read: a branch, a
+/// stale tree or an uncommitted edit can't become what the fleet trusts. Under `refs/tags/` GitHub
+/// answers 404 for a branch or a commit (design section 7.9).
+pub fn signer_at_tag(raw: &str, tag: &str) -> Result<String> {
+    // The tag goes into a URL path; nothing that could leave `refs/tags/` is sent.
+    if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
+        || tag.contains("..")
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    {
+        bail!("'{tag}' is not a release tag (letters, digits, '.', '_' and '-')");
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let url = format!("{raw}/refs/tags/{tag}/{ALLOWED_SIGNERS}");
+    let mut response = crate::ninja::agent()
+        .get(&url)
+        .call()
+        .with_context(|| format!("fetching {url}"))?;
+    let status = response.status().as_u16();
+    if status != 200 {
+        bail!("GitHub has no {ALLOWED_SIGNERS} at tag '{tag}' ({status} from {url})");
+    }
+    let text = response.body_mut().read_to_string()?;
     let key = text
         .split_once("ssh-ed25519")
         .map(|(_, rest)| format!("ssh-ed25519{rest}"))
@@ -219,44 +229,27 @@ mod tests {
     }
 
     #[test]
-    fn the_signer_is_read_at_a_tag_and_never_from_the_checkout() {
-        let dir = std::env::temp_dir().join(format!("posctl-signer-{}", std::process::id()));
-        fs::create_dir_all(dir.join("pos")).unwrap();
-        let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .arg("-C")
-                .arg(&dir)
-                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
-                .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
-                .args(args)
-                .output()
-                .unwrap();
+    fn the_signer_is_fetched_from_github_at_a_tag_and_only_a_tag() {
+        let released = keys::public_line(keys::generate("").unwrap().public_key()).unwrap();
+        let file = format!("pos-tunnel-release namespaces=\"pos-tunnel-release\" {released}\n");
+        // GitHub's raw file host: a file under refs/tags/<tag>/, 404 for anything that isn't a tag.
+        let fake = crate::fake::Fake::start(move |_, path, _| match path {
+            "/refs/tags/v1.2.3/pos/allowed_signers" => (200, file.as_str().into()),
+            _ => (404, "404: Not Found".into()),
+        });
+        assert_eq!(signer_at_tag(&fake.url, "v1.2.3").unwrap(), released);
+        let error = signer_at_tag(&fake.url, "main").unwrap_err().to_string();
+        assert!(
+            error.contains("at tag 'main'") && error.contains("404"),
+            "{error}"
+        );
+        // Nothing that could leave refs/tags/ in the URL is sent.
+        for not_a_tag in ["", "..", "v1/../../heads/main", "v1?ref=main", ".hidden"] {
+            let error = signer_at_tag(&fake.url, not_a_tag).unwrap_err().to_string();
             assert!(
-                out.status.success(),
-                "{}",
-                String::from_utf8_lossy(&out.stderr)
+                error.contains("is not a release tag"),
+                "{not_a_tag}: {error}"
             );
-        };
-        let key = || keys::public_line(keys::generate("").unwrap().public_key()).unwrap();
-        let (released, later) = (key(), key());
-        let commit = |signer: &str| {
-            let line = format!("pos-tunnel-release namespaces=\"pos-tunnel-release\" {signer}\n");
-            fs::write(dir.join(ALLOWED_SIGNERS), line).unwrap();
-            git(&["add", "."]);
-            git(&["commit", "-q", "-m", "signer"]);
-        };
-        git(&["init", "-q", "-b", "main"]);
-        commit(&released);
-        git(&["tag", "v1"]);
-        commit(&later);
-
-        assert_eq!(signer_at_tag(&dir, "v1").unwrap(), released);
-        // Only a tag names a release: a branch, a commit and a tag that doesn't exist are refused.
-        for not_a_tag in ["main", "HEAD", "v2"] {
-            let error = signer_at_tag(&dir, not_a_tag).unwrap_err().to_string();
-            assert!(error.contains(&format!("at tag '{not_a_tag}'")), "{error}");
         }
-        // Git's object files are read-only, which Windows may refuse to delete.
-        let _ = fs::remove_dir_all(&dir);
     }
 }
