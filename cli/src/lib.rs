@@ -2,6 +2,7 @@
 //! operations. Design: `docs/design.md`.
 
 pub mod config;
+pub mod fleet;
 pub mod keys;
 pub mod ninja;
 
