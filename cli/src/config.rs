@@ -72,6 +72,16 @@ impl Config {
     }
 }
 
+/// The relay a config file's text pins, read without the rest of the file: `init` rewrites the config
+/// and must keep the pin even when the old file predates a field `Config` now requires.
+pub fn pinned_relay(config_text: &str) -> Result<Option<Relay>> {
+    #[derive(Deserialize)]
+    struct Pin {
+        relay: Option<Relay>,
+    }
+    Ok(toml::from_str::<Pin>(config_text)?.relay)
+}
+
 /// `<host>[:<port>]`, the port defaulting to the relay's.
 pub fn parse_host_port(value: &str) -> Result<(String, u16)> {
     let (host, port) = match value.rsplit_once(':') {
@@ -170,5 +180,21 @@ mod tests {
             toml::from_str::<Config>(&toml::to_string(&config).unwrap()).unwrap(),
             config
         );
+    }
+
+    #[test]
+    fn the_pinned_relay_survives_a_config_that_predates_a_field() {
+        // As written before `organization_id` existed.
+        let old = "operator_key = \"k\"\n\n[ninjaone]\nbase_url = \"https://us2.ninjarmm.com\"\nclient_id = \"abc\"\npos_policy_id = 7\ninstall_script_id = 93\ninvoke_script_id = 94\n\n[relay]\nhost = \"relay.example.com\"\nport = 2222\npublic_key = \"ssh-ed25519 AAAA\"\n";
+        assert!(toml::from_str::<Config>(old).is_err());
+        assert_eq!(
+            pinned_relay(old).unwrap(),
+            Some(Relay {
+                host: "relay.example.com".into(),
+                port: 2222,
+                public_key: "ssh-ed25519 AAAA".into(),
+            })
+        );
+        assert_eq!(pinned_relay("operator_key = \"k\"\n").unwrap(), None);
     }
 }

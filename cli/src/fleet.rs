@@ -198,8 +198,8 @@ pub struct Pointed {
 /// `posctl-admin relay point`: writes the organization's fleet relay fields, then starts
 /// `Install-PosTunnel -Force` on every online POS at once, or on `device` alone (a test POS, by exact
 /// display name). `device` limits the install only: the organization's relay changes either way, so
-/// its other POSes follow at their next scheduled install. It is resolved first, so a mistyped or
-/// offline one changes nothing.
+/// its other POSes follow at their next scheduled install. The targets are listed before the write,
+/// so a mistyped or offline `device`, or an organization with no POS, changes nothing.
 pub fn point_relay(
     api: &Api,
     ninja: &NinjaOne,
@@ -207,21 +207,27 @@ pub fn point_relay(
     public_key: &str,
     device: Option<&str>,
 ) -> Result<Pointed> {
-    let target = device.map(|name| find_pos(api, ninja, name)).transpose()?;
-    if let Some(target) = &target
-        && target.offline
-    {
+    let targets = match device {
+        Some(name) => {
+            let target = find_pos(api, ninja, name)?;
+            if target.offline {
+                bail!("{name} is offline");
+            }
+            vec![target]
+        }
+        None => pos_devices(api, ninja)?,
+    };
+    // Before the write: an organization and policy that match no device would otherwise get the
+    // fields and a report of success with nothing installed.
+    if targets.is_empty() {
         bail!(
-            "{} is offline",
-            target.display_name.as_deref().unwrap_or_default()
+            "no device of organization {} has the POS policy (id {}); nothing was written",
+            ninja.organization_id,
+            ninja.pos_policy_id
         );
     }
     let values = json!({"posTunnelRelay": address, "posTunnelRelayServerKey": public_key});
     set_fleet_fields(api, ninja, &values)?;
-    let targets = match target {
-        Some(target) => vec![target],
-        None => pos_devices(api, ninja)?,
-    };
     let (mut ran, mut offline, mut failed) = (Vec::new(), Vec::new(), Vec::new());
     for device in targets {
         let name = device
@@ -549,6 +555,32 @@ mod tests {
             let path = format!("/v2/device/{id}/script/run");
             assert!(fake.requests_to("POST", &path).is_empty());
         }
+    }
+
+    #[test]
+    fn point_relay_with_no_pos_in_the_organization_writes_nothing() {
+        let fake = tenant();
+        let ninja = NinjaOne {
+            pos_policy_id: 99,
+            ..ninja()
+        };
+        let error = point_relay(
+            &Api::with_token(&fake.url, "t"),
+            &ninja,
+            "relay.example.com:2222",
+            "ssh-ed25519 AAAA",
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("no device of organization 3 has the POS policy (id 99)"),
+            "{error}"
+        );
+        assert!(
+            fake.requests_to("PATCH", "/v2/organization/3/custom-fields")
+                .is_empty()
+        );
     }
 
     #[test]
