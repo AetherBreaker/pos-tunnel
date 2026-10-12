@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 /// Default and ceiling for `--idle-timeout`; the relay enforces the same ceiling (design section 5).
