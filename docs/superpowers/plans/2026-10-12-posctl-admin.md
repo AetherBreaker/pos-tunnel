@@ -100,7 +100,7 @@ Each was settled by a probe or by the user; Task 6 records them in the design.
 - Produces (`posctl::config`): `Config { operator_key: PathBuf, ninjaone: NinjaOne, relay: Option<Relay> }` with `Config::path()`, `Config::load()`, `Config::save(&self)`; `NinjaOne { base_url, client_id: String, pos_policy_id, install_script_id, invoke_script_id: i64 }`; `Relay { host: String, port: u16, public_key: String }`; `DEFAULT_RELAY_PORT: u16 = 2222`; `config_home() -> Result<PathBuf>` (`POSCTL_CONFIG_HOME` overrides the platform config dir); `parse_host_port(&str) -> Result<(String, u16)>`; `write_private(&Path, &[u8]) -> Result<()>`.
 - Produces (`posctl::keys`): `generate(comment) -> Result<PrivateKey>`, `public_line(&PublicKey) -> Result<String>` (`ssh-ed25519 <base64>`, no comment), `parse_public(&str) -> Result<String>`, `private_text(&PrivateKey, Option<&str>) -> Result<String>`, `write_private_key(&Path, &PrivateKey, Option<&str>)`, `public_of_file(&Path) -> Result<String>`.
 
-- [ ] **Step 1: Replace `cli/Cargo.toml` and move the binary**
+- [x] **Step 1: Replace `cli/Cargo.toml` and move the binary**
 
 `cli/Cargo.toml` (Task 5 adds the `posctl-admin` binary):
 
@@ -156,7 +156,7 @@ pub mod config;
 pub mod keys;
 ```
 
-- [ ] **Step 2: Write the tests**
+- [x] **Step 2: Write the tests**
 
 `cli/src/config.rs`, the tests alone for now:
 
@@ -282,12 +282,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run them to watch them fail**
+- [x] **Step 3: Run them to watch them fail**
 
 Run: `cargo test --lib 2>&1 | grep -E "^error" | head -5`
 Expected: compile errors, the tests' `use super::*` finding nothing yet, such as `` error[E0422]: cannot find struct, variant or union type `Config` in this scope ``.
 
-- [ ] **Step 4: Write `config.rs`**
+- [x] **Step 4: Write `config.rs`**
 
 Insert above its tests module:
 
@@ -409,7 +409,7 @@ pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 ```
 
-- [ ] **Step 5: Write `keys.rs`**
+- [x] **Step 5: Write `keys.rs`**
 
 Insert above its tests module:
 
@@ -473,7 +473,7 @@ pub fn public_of_file(path: &Path) -> Result<String> {
 }
 ```
 
-- [ ] **Step 6: Check and commit**
+- [x] **Step 6: Check and commit**
 
 Run the check. Expected: `test result: ok. 7 passed`, nothing from clippy or fmt.
 
@@ -497,7 +497,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces (`posctl::ninja`): `login(base_url, client_id) -> Result<()>` (browser sign-in, stores the refresh token); `token_store::{save, load}`; `Api::connect(base_url, client_id) -> Result<Api>`, `Api::with_token(base_url, token)` (tests); `Api::get<T>`, `devices() -> Vec<Device>`, `policies()`, `scripts() -> Vec<Named>`, `field_definition(name) -> Option<FieldDefinition>`, `create_field(&Value)`, `set_organization_fields(org, &Value)`, `run_script(device, script, parameters)`; `Device { id, display_name: Option<String>, organization_id, offline, policy_id, role_policy_id }` with `effective_policy()`; `Named { id, name }`; `FieldDefinition { name, definition_scope: Vec<String>, script_permission, api_permission: Option<String> }`.
 - Produces (`crate::fake`, tests only): `Fake::start(|method, path, body| (status, reply))`, `fake.url`, `fake.requests_to(method, path) -> Vec<Value>`.
 
-- [ ] **Step 1: Write the fake NinjaOne**
+- [x] **Step 1: Write the fake NinjaOne**
 
 `cli/src/fake.rs`:
 
@@ -598,7 +598,7 @@ pub mod ninja;
 mod fake;
 ```
 
-- [ ] **Step 2: Write the tests**
+- [x] **Step 2: Write the tests**
 
 `cli/src/ninja.rs`, the tests alone for now:
 
@@ -734,12 +734,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run them to watch them fail**
+- [x] **Step 3: Run them to watch them fail**
 
 Run: `cargo test --lib ninja 2>&1 | grep -E "^error" | head -5`
 Expected: compile errors, the tests' `use super::*` finding nothing yet, such as `` error: cannot find macro `json` in this scope ``.
 
-- [ ] **Step 4: Write `ninja.rs`**
+- [x] **Step 4: Write `ninja.rs`**
 
 Insert above its tests module:
 
@@ -1147,7 +1147,7 @@ impl Api {
 }
 ```
 
-- [ ] **Step 5: Check and commit**
+- [x] **Step 5: Check and commit**
 
 Run the check. Expected: `test result: ok. 14 passed`, nothing from clippy or fmt.
 
@@ -1174,7 +1174,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: `ninja::{Api, Device, FieldDefinition}`, `config::NinjaOne`, `fake::Fake`.
 - Produces (`posctl::fleet`): `FIELDS: [Field; 6]`; `ensure_fields(&Api) -> Result<Vec<&str>>` (the names it created); `pos_devices(&Api, policy) -> Result<Vec<Device>>`; `find_pos(&Api, policy, name) -> Result<Device>` (the next plan's `connect` resolves devices with it); `set_fleet_fields(&Api, policy, &Value) -> Result<Vec<i64>>` (the organizations written); `point_relay(&Api, &NinjaOne, address, public_key, device: Option<&str>) -> Result<Pointed>`; `Pointed { organizations: Vec<i64>, ran, offline: Vec<String> }`.
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 `cli/src/lib.rs`:
 
@@ -1458,12 +1458,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run them to watch them fail**
+- [x] **Step 2: Run them to watch them fail**
 
 Run: `cargo test --lib fleet 2>&1 | grep -E "^error" | head -5`
 Expected: compile errors, the tests' `use super::*` finding nothing yet, such as `` error: cannot find macro `json` in this scope ``.
 
-- [ ] **Step 3: Write `fleet.rs`**
+- [x] **Step 3: Write `fleet.rs`**
 
 Insert above its tests module:
 
@@ -1726,7 +1726,7 @@ pub fn point_relay(
 }
 ```
 
-- [ ] **Step 4: Check and commit**
+- [x] **Step 4: Check and commit**
 
 Run the check. Expected: `test result: ok. 22 passed`, nothing from clippy or fmt.
 
@@ -1754,7 +1754,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Produces (`posctl::admin`): `ADMIN_KEY: &str`; `require_admin(&Path) -> Result<()>`; `dir()`, `relay_key_path()`, `signing_key_path() -> Result<PathBuf>`; `relay_env_line(&str) -> String`; `Operators { operators: BTreeMap<String, String> }` with `load()`, `save()`, `add(name, public_key)`, `remove(name, admin_key)`, `env_line()`; `check_operator_name(&str) -> Result<()>`.
 - Produces (`posctl::bundle`): `Bundle { operator_key: String, config: Config }` with `encode() -> Result<String>`, `Bundle::decode(&str) -> Result<Bundle>`.
 
-- [ ] **Step 1: A placeholder admin key**
+- [x] **Step 1: A placeholder admin key**
 
 `admin.rs` builds in `cli/admin.pub`; Task 6 replaces it with the admin's own. Generate a throwaway key pair outside the repository and keep only its public key:
 
@@ -1762,7 +1762,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 dir=$(mktemp -d) && ssh-keygen -q -t ed25519 -N "" -C "" -f "$dir/placeholder" && cut -d' ' -f1,2 "$dir/placeholder.pub" > cli/admin.pub && rm -r "$dir"
 ```
 
-- [ ] **Step 2: Write the tests**
+- [x] **Step 2: Write the tests**
 
 `cli/src/lib.rs`:
 
@@ -1885,12 +1885,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run them to watch them fail**
+- [x] **Step 3: Run them to watch them fail**
 
 Run: `cargo test --lib 2>&1 | grep -E "^error" | head -5`
 Expected: compile errors, the tests' `use super::*` finding nothing yet, such as `` error[E0433]: cannot find module or crate `keys` in this scope ``.
 
-- [ ] **Step 4: Write `admin.rs` and `bundle.rs`**
+- [x] **Step 4: Write `admin.rs` and `bundle.rs`**
 
 Insert above `admin.rs`'s tests module:
 
@@ -2065,7 +2065,7 @@ impl Bundle {
 }
 ```
 
-- [ ] **Step 5: Check and commit**
+- [x] **Step 5: Check and commit**
 
 Run the check. Expected: `test result: ok. 28 passed`, nothing from clippy or fmt.
 
@@ -2089,7 +2089,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 - Consumes: everything above.
 - Produces: `posctl login | operator import | relay set <host>[:<port>] <public key>`; `posctl-admin init --base-url --client-id --policy --operator-key --name | relay keygen <host>[:<port>] | relay point [--device <name>] | signing keygen | signing publish | operator add <name> | operator remove <name> | operator list`. `relay keygen` prints the `RELAY_SSH_PRIVATE_KEY=` line on stdout; `operator add` prints the bundle, then the `OPERATOR_KEYS=` line.
 
-- [ ] **Step 1: Write the integration test**
+- [x] **Step 1: Write the integration test**
 
 It builds both binaries with its own admin key (`POSCTL_ADMIN_KEY`), has `posctl-admin` generate the relay key pair and a second operator, starts the relay submodule's own test image with those lines, and logs in as each operator with the relay's public key pinned. `tests/cli/test_relay_setup.py`:
 
@@ -2272,7 +2272,7 @@ def test_relay_set_repoints_an_operator(setup: Setup):
   assert config_of(setup.bob_home)["relay"] == {"host": "relay.example.com", "port": 2222, "public_key": relay_key}
 ```
 
-- [ ] **Step 2: Run it to watch it fail**
+- [x] **Step 2: Run it to watch it fail**
 
 Needs Docker and the relay submodule (`git submodule update --init relay`).
 
@@ -2281,7 +2281,7 @@ Delete any `posctl-admin.exe` an earlier build left in the shared target dir fir
 Run: `POS_TUNNEL_DOCKER=1 uv run pytest tests/cli --no-cov -q 2>&1 | tail -3`
 Expected: `4 errors`: the fixture can't run `posctl-admin` (`FileNotFoundError`), since that binary doesn't exist yet.
 
-- [ ] **Step 3: Add the `posctl-admin` binary to `cli/Cargo.toml`**
+- [x] **Step 3: Add the `posctl-admin` binary to `cli/Cargo.toml`**
 
 After the `posctl` `[[bin]]` section:
 
@@ -2291,7 +2291,7 @@ name = "posctl-admin"
 path = "src/bin/posctl-admin.rs"
 ```
 
-- [ ] **Step 4: Write `posctl.rs`**
+- [x] **Step 4: Write `posctl.rs`**
 
 `cli/src/bin/posctl.rs` (replacing it):
 
@@ -2428,7 +2428,7 @@ fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 5: Write `posctl-admin.rs`**
+- [x] **Step 5: Write `posctl-admin.rs`**
 
 `cli/src/bin/posctl-admin.rs`:
 
@@ -2739,7 +2739,7 @@ fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 6: Run the integration test**
+- [x] **Step 6: Run the integration test**
 
 Run: `POS_TUNNEL_DOCKER=1 uv run pytest tests/cli --no-cov -q 2>&1 | tail -2`
 Expected: `4 passed`.
@@ -2747,7 +2747,7 @@ Expected: `4 passed`.
 Then: `uv run ruff check tests/cli && uv run ruff format --check tests/cli && uv run pyright tests/cli`
 Expected: `All checks passed!`, `1 file already formatted`, `0 errors, 0 warnings, 0 informations`.
 
-- [ ] **Step 7: Add the CI job**
+- [x] **Step 7: Add the CI job**
 
 In `.github/workflows/ci.yml`, after the `pos-integration` job:
 
@@ -2770,7 +2770,7 @@ In `.github/workflows/ci.yml`, after the `pos-integration` job:
         run: uv run --no-project --python 3.14 --with pytest --with pytest-cov --with pytest-asyncio pytest tests/cli
 ```
 
-- [ ] **Step 8: Check, commit, push**
+- [x] **Step 8: Check, commit, push**
 
 Run the check. Expected: `test result: ok. 28 passed`, nothing from clippy or fmt. Also `uvx maturin build --out "$(mktemp -d)"` and list the wheel: it holds `posctl.exe` and `posctl-admin.exe`.
 
@@ -2798,7 +2798,7 @@ Run the CI check. Expected: four lines, each ending `success`, including `posctl
 - Replace: `cli/admin.pub` (the admin's own)
 - Modify: `docs/design.md`, `README.md`
 
-- [ ] **Step 1: Bring `docs/design.md` up to date**
+- [x] **Step 1: Bring `docs/design.md` up to date**
 
 Make these replacements. Each Old block is the passage exactly as it stands; replace it with the New block.
 
@@ -3008,7 +3008,7 @@ Make these replacements. Each Old block is the passage exactly as it stands; rep
        whole fleet, and schedule `Install-PosTunnel` daily in the POS policy.
     ```
 
-- [ ] **Step 2: Update the README's status line**
+- [x] **Step 2: Update the README's status line**
 
 In `README.md`:
 
@@ -3036,7 +3036,7 @@ publish; the custom-field scope NinjaOne requires.
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 3: Ask the user for the admin's operator public key**
+- [x] **Step 3: Ask the user for the admin's operator public key**
 
 Stop and ask the user to generate the admin's operator key pair on their workstation (PowerShell; a passphrase is fine, `posctl-admin` reads the public half), and to give you the `.pub` line:
 
@@ -3054,7 +3054,11 @@ git commit -m "chore(cli): build posctl-admin with the admin's operator public k
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 4: Run posctl-admin against the tenant**
+- [x] **Step 4: Run posctl-admin against the tenant**
+
+> Changed in flight (user, 2026-10-12): `signing publish` now takes a release tag and reads the key from
+> the repository at it. No release tag exists yet and `posTunnelSigner` already holds this key, so this
+> step runs `init` only.
 
 This writes the admin's real `config.toml` (deployment step 2). Tell the user a browser tab will ask them to sign in to NinjaOne and approve. From the repository root:
 
@@ -3068,7 +3072,7 @@ cid=$(grep -m1 '^NINJAONE_NATIVE_CLIENT_ID=' .env | cut -d= -f2- | tr -d '\r"'"'
 
 Expected: `posctl is set up for <name>, policy 'Store POS Windows 11' (id 35). Next: ...`, then `posTunnelSigner written on organizations [3].` (the six fields already exist with the right settings, so nothing is created).
 
-- [ ] **Step 5: Push and check**
+- [x] **Step 5: Push and check**
 
 ```bash
 git push
