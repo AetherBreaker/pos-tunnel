@@ -81,7 +81,7 @@ enum SigningCommand {
     /// publish the public key. Run from a checkout of pos-tunnel; then re-sign and release.
     Keygen,
     /// Publish the signing public key a release was made with to the posTunnelSigner fleet field: the
-    /// one in pos/allowed_signers at that release's git tag, whatever is checked out.
+    /// one in pos/allowed_signers at that release's git tag, fetched from GitHub. No checkout is read.
     Publish {
         /// The release's git tag.
         tag: String,
@@ -272,8 +272,8 @@ fn main() -> Result<()> {
                     public_key
                 }
                 SigningCommand::Publish { tag } => {
-                    let public_key = admin::signer_at_tag(Path::new("."), &tag)?;
-                    println!("Signing public key at tag {tag}: {public_key}");
+                    let public_key = admin::signer_at_tag(admin::GITHUB_RAW, &tag)?;
+                    println!("Signing public key at tag {tag} on GitHub: {public_key}");
                     public_key
                 }
             };

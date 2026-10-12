@@ -144,7 +144,7 @@ fn parse_callback(request_line: &str, state: &str) -> Callback {
     }
 }
 
-fn agent() -> Agent {
+pub(crate) fn agent() -> Agent {
     Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(60)))
