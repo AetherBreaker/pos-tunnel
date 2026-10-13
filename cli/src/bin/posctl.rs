@@ -91,8 +91,9 @@ enum RelayCommand {
 
 fn parse_idle_timeout(s: &str) -> Result<Duration> {
     let d = humantime::parse_duration(s)?;
-    if d.is_zero() || d > MAX_IDLE {
-        bail!("idle timeout must be greater than 0 and at most 12h");
+    // The relay counts whole seconds, from 1 (design section 6.4).
+    if d.as_secs() == 0 || d.subsec_nanos() != 0 || d > MAX_IDLE {
+        bail!("idle timeout must be whole seconds, from 1s to 12h");
     }
     Ok(d)
 }
@@ -232,21 +233,19 @@ fn main() -> Result<()> {
                     let (lease, alias) = (&connected.lease, &connected.alias);
                     match connected.how {
                         How::Opened => println!("{name} is connected: ssh {alias}"),
-                        How::Joined => {
-                            println!(
-                                "Joined the session {} opened on {name}: ssh {alias}",
-                                lease.operator
-                            );
-                            if idle_timeout.is_some() {
-                                println!(
-                                    "--idle-timeout applies only to a session this opens; this one keeps its own."
-                                );
-                            }
-                        }
+                        How::Joined => println!(
+                            "Joined the session {} opened on {name}: ssh {alias}",
+                            lease.operator
+                        ),
                         How::AlreadyOpen => println!(
                             "{name} is already connected (tunnel {}): ssh {alias}",
                             if lease.listening { "up" } else { "down" }
                         ),
+                    }
+                    if idle_timeout.is_some() && connected.how != How::Opened {
+                        println!(
+                            "--idle-timeout applies only to a session this opens; this one keeps its own."
+                        );
                     }
                     println!("{}", deadlines(lease));
                 }
@@ -379,4 +378,24 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_idle_timeout_is_whole_seconds_from_one_second_to_twelve_hours() {
+        for ok in ["1s", "90s", "45m", "12h"] {
+            assert!(parse_idle_timeout(ok).is_ok(), "{ok}");
+        }
+        // The relay counts whole seconds: these it would refuse, or cut down without saying.
+        for refused in ["0s", "500ms", "1500ms", "12h 1s"] {
+            let error = parse_idle_timeout(refused).unwrap_err().to_string();
+            assert_eq!(
+                error, "idle timeout must be whole seconds, from 1s to 12h",
+                "{refused}"
+            );
+        }
+    }
 }

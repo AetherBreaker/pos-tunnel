@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -151,6 +152,10 @@ pub struct Pos {
     /// After a rekey, how many reads of its fields still show the old keys: NinjaOne's API shows what
     /// a script wrote well after the run's result (design section 8).
     pub publish_lag: usize,
+    /// How many looks at its runs NinjaOne fails before it answers.
+    pub flaky_looks: usize,
+    /// NinjaOne cuts its rekey's report off before the field lines.
+    pub cut_report: bool,
 }
 
 /// The keys every POS of `pos_tenant` publishes when it is rekeyed.
@@ -173,6 +178,8 @@ impl Default for Pos {
             fail: None,
             silent: false,
             publish_lag: 0,
+            flaky_looks: 0,
+            cut_report: false,
         }
     }
 }
@@ -184,6 +191,7 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
     let activities = Mutex::new(Vec::<Value>::new());
     // Each rekeyed device, with how often its fields were read since.
     let rekeyed = Mutex::new(HashMap::<i64, usize>::new());
+    let looks = AtomicUsize::new(0);
     let served = pos.clone();
     let fake = Fake::start(move |method, path, body| {
         let (route, query) = path.split_once('?').unwrap_or((path, ""));
@@ -231,6 +239,12 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
                         "posTunnelVersion": pos.version, "rustdeskAudit": "x"}),
                 )
             }
+            ("GET", ["device", "1", "activities"])
+                if query.contains("newerThan") | query.contains("seriesUid")
+                    && looks.fetch_add(1, Ordering::SeqCst) < served.flaky_looks =>
+            {
+                (502, json!({"error": "bad gateway"}))
+            }
             ("GET", ["device", id, "activities"]) => {
                 let device: i64 = id.parse().unwrap();
                 let newer: i64 = param("newerThan").map_or(0, |id| id.parse().unwrap());
@@ -273,6 +287,9 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
                         "CHANGED\ttunnel\tstopped\r\nOK\tclose\tsession ended".to_owned()
                     }
                     (_, "Install") => "OK\tsignature\r\nOK\tfield posTunnelRelayKey\r\nOK\tfield posTunnelHostKey\r\nOK\tfield posTunnelVersion\r\nOK\tcurrent\tversion 4".to_owned(),
+                    (_, "Rekey") if device == 1 && served.cut_report => {
+                        "CHANGED\trelay key pair\tregenerated".to_owned()
+                    }
                     (_, "Rekey") => {
                         rekeyed.insert(device, 0);
                         format!(
@@ -328,6 +345,12 @@ pub struct FakeRelay {
     pub taken_over_after: Cell<Option<usize>>,
     /// The command after this many panics: the `posctl` asking is cut off there, as by a kill.
     pub cut_off_after: Cell<Option<usize>>,
+    /// How many `status` replies come before a tunnel shows as up.
+    pub up_after: Cell<usize>,
+    /// The command of this number, counted from 1, doesn't reach the relay.
+    pub unreachable_at: Cell<Option<usize>>,
+    /// After this many commands another operator opens a session on device 1.
+    pub raced_after: Cell<Option<usize>>,
     closed: RefCell<Vec<(Lease, u32)>>,
     opened: Cell<u32>,
 }
@@ -345,6 +368,9 @@ impl FakeRelay {
             linger: Cell::new(0),
             taken_over_after: Cell::new(None),
             cut_off_after: Cell::new(None),
+            up_after: Cell::new(0),
+            unreachable_at: Cell::new(None),
+            raced_after: Cell::new(None),
             closed: RefCell::default(),
             opened: Cell::new(0),
         }
@@ -389,6 +415,17 @@ impl Relay for FakeRelay {
                 .is_none_or(|limit| answered < limit),
             "cut off at `{command}`"
         );
+        if self.unreachable_at.get() == Some(answered + 1) {
+            bail!("couldn't reach the relay: Connection timed out");
+        }
+        if self
+            .raced_after
+            .get()
+            .is_some_and(|limit| answered >= limit)
+        {
+            self.raced_after.set(None);
+            self.open_as("Bob", 1);
+        }
         if self
             .starting_after
             .get()
@@ -420,8 +457,9 @@ impl Relay for FakeRelay {
                     *left -= 1;
                     *left > 0
                 });
+                let up = self.listening.get() && self.count("status") > self.up_after.get();
                 for lease in &mut listed {
-                    lease.listening = self.listening.get();
+                    lease.listening = up;
                 }
                 listed.sort_by_key(|lease| lease.port);
                 Ok(serde_json::to_string(&listed)?)
