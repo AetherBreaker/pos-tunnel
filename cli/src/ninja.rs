@@ -284,7 +284,8 @@ pub struct ScriptRun {
 pub struct ScriptResult {
     /// NinjaOne's verdict, and no `FAILED` line in the output.
     pub success: bool,
-    /// What the script printed. The POS's words: untrusted, shown as its report and nothing more.
+    /// What the script printed. The POS's words: untrusted, shown as its report and otherwise read
+    /// only for which field values to wait for (`published`).
     pub output: String,
 }
 
@@ -294,6 +295,18 @@ impl ScriptResult {
         self.output
             .lines()
             .any(|line| line.starts_with("DEFERRED\t"))
+    }
+
+    /// The device fields the script says it wrote, each with its value: the
+    /// `CHANGED<TAB>field <name><TAB><value>` lines of `Publish-DeviceFields`.
+    pub fn published(&self) -> Vec<(&str, &str)> {
+        self.output
+            .lines()
+            .filter_map(|line| {
+                let (step, value) = line.strip_prefix("CHANGED\t")?.split_once('\t')?;
+                Some((step.strip_prefix("field ")?, value))
+            })
+            .collect()
     }
 }
 
@@ -450,6 +463,37 @@ impl Api {
     /// The device's custom fields, name to value; a field never set is absent.
     pub fn custom_fields(&self, device: i64) -> Result<serde_json::Map<String, Value>> {
         self.get(&format!("/v2/device/{device}/custom-fields"))
+    }
+
+    /// Waits until NinjaOne shows every field value `result` says its script wrote; `false` if
+    /// `deadline` passes first. The API shows a POS's field writes well after its run's result (39 s
+    /// on the test POS, design section 11), and `connect` reads a POS's keys and version there. A
+    /// deadline rather than a timeout, so that the waits for many POSes share one.
+    pub fn await_published(
+        &self,
+        device: i64,
+        result: &ScriptResult,
+        deadline: Instant,
+        poll: Duration,
+    ) -> bool {
+        let written = result.published();
+        loop {
+            // A failed read is one more "not yet"; the deadline bounds it.
+            let shown = written.is_empty()
+                || self.custom_fields(device).is_ok_and(|fields| {
+                    written.iter().all(|(name, value)| {
+                        // The version may come back a number, which `connect` allows for too.
+                        fields.get(*name).is_some_and(|shown| {
+                            shown.as_str() == Some(*value)
+                                || shown.as_u64().is_some_and(|n| value.parse() == Ok(n))
+                        })
+                    })
+                });
+            if shown || Instant::now() >= deadline {
+                return shown;
+            }
+            std::thread::sleep(poll);
+        }
     }
 
     /// `run_script`, returning what `poll_script` follows the run by: `script/run` itself returns
@@ -897,5 +941,45 @@ mod tests {
             silent.contains("the POS reported no result for Invoke-PosTunnel within 200ms"),
             "{silent}"
         );
+    }
+
+    #[test]
+    fn written_fields_are_waited_for_until_ninjaone_shows_them() {
+        // The first two reads still show the old key; the version comes back as a number.
+        let reads = std::sync::atomic::AtomicUsize::new(0);
+        let fake = crate::fake::Fake::start(move |_, _, _| {
+            let read = reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let key = if read < 2 { "old" } else { "new" };
+            (
+                200,
+                json!({"posTunnelRelayKey": key, "posTunnelVersion": 4}),
+            )
+        });
+        let api = Api::with_token(&fake.url, "t");
+        let asked = || fake.requests_to("GET", "/v2/device/1/custom-fields").len();
+        let result = |output: &str| ScriptResult {
+            success: true,
+            output: output.to_owned(),
+        };
+        let poll = Duration::from_millis(5);
+
+        let wrote = result(
+            "CHANGED\trelay key pair\tregenerated\nCHANGED\tfield posTunnelRelayKey\tnew\nCHANGED\tfield posTunnelVersion\t4",
+        );
+        assert_eq!(
+            wrote.published(),
+            [("posTunnelRelayKey", "new"), ("posTunnelVersion", "4")]
+        );
+        assert!(api.await_published(1, &wrote, Instant::now() + Duration::from_secs(5), poll));
+        assert_eq!(asked(), 3);
+
+        // Nothing written: nothing to wait for, and nothing asked.
+        let unchanged = result("OK\tfield posTunnelRelayKey\nOK\tfield posTunnelVersion");
+        assert!(api.await_published(1, &unchanged, Instant::now(), poll));
+        assert_eq!(asked(), 3);
+
+        // A value NinjaOne never shows runs the wait out.
+        let unseen = result("CHANGED\tfield posTunnelRelayKey\tnewer");
+        assert!(!api.await_published(1, &unseen, Instant::now() + Duration::from_millis(50), poll));
     }
 }

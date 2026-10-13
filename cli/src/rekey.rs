@@ -1,5 +1,7 @@
 //! `posctl rekey` (design section 7.8): new key pairs on one POS or on every online one.
 
+use std::time::Instant;
+
 use anyhow::{Result, bail};
 
 use crate::fleet;
@@ -125,10 +127,27 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
         targets.extend(plan.targets.into_iter().map(|(device, _)| device));
     }
     let ids: Vec<i64> = targets.iter().map(|device| device.id).collect();
-    for (device, rekeyed) in targets.iter().zip(all(&ids, "Rekey")) {
+    let rekeyed = all(&ids, "Rekey");
+    // One deadline for all: NinjaOne takes in every POS's new keys at the same time.
+    let deadline = Instant::now() + ctx.timing.published;
+    for (device, rekeyed) in targets.iter().zip(rekeyed) {
         let outcome = match rekeyed {
-            Ok(result) if result.success => Outcome::Rekeyed,
-            Ok(result) => Outcome::Failed(format!("it reported:\n{}", result.output)),
+            Ok(result) if !result.success => {
+                Outcome::Failed(format!("it reported:\n{}", result.output))
+            }
+            // `connect` reads a POS's keys from NinjaOne, which shows new ones well after the run's
+            // result (design section 8); a `connect` before then would hand out the old ones.
+            Ok(result)
+                if ctx
+                    .api
+                    .await_published(device.id, &result, deadline, ctx.timing.poll) =>
+            {
+                Outcome::Rekeyed
+            }
+            Ok(_) => Outcome::Failed(format!(
+                "it has new keys, but NinjaOne didn't show them within {}: `posctl connect` fails until it does",
+                humantime::format_duration(ctx.timing.published)
+            )),
             Err(e) => Outcome::Failed(format!("{e:#}")),
         };
         outcomes.push((label(device), outcome));
@@ -138,8 +157,12 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
-    use crate::fake::{FakeRelay, Pos, context, pos_tenant, workstation};
+    use crate::fake::{
+        FakeRelay, Pos, REKEYED_HOST_KEY, REKEYED_RELAY_KEY, context, pos_tenant, workstation,
+    };
     use crate::ninja::Api;
     use crate::session;
 
@@ -285,6 +308,57 @@ mod tests {
         );
         assert!(relay.leases.borrow().is_empty());
         assert_eq!(actions(&tenant, 2), ["-Action Close", "-Action Rekey"]);
+    }
+
+    #[test]
+    fn a_connect_after_a_rekey_gets_the_new_keys() {
+        // NinjaOne still shows the old keys for two reads after the run's result.
+        let (tenant, _) = pos_tenant(Pos {
+            publish_lag: 2,
+            ..Pos::default()
+        });
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("rekey then connect");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+
+        let plan = plan(&ctx, Some("POS 000 Test"), false).unwrap();
+        let outcomes = run(&ctx, plan, false).unwrap();
+        assert_eq!(outcomes, [("POS 000 Test".to_owned(), Outcome::Rekeyed)]);
+
+        session::connect(&ctx, "POS 000 Test", Duration::from_secs(7200)).unwrap();
+        assert!(
+            relay
+                .calls()
+                .contains(&format!("open 20001 1 7200 {REKEYED_RELAY_KEY}")),
+            "{:?}",
+            relay.calls()
+        );
+        assert_eq!(ws.held().unwrap()[0].host_key, REKEYED_HOST_KEY);
+    }
+
+    #[test]
+    fn new_keys_ninjaone_never_shows_fail_that_rekey_alone() {
+        let (tenant, _) = pos_tenant(Pos {
+            publish_lag: usize::MAX,
+            ..Pos::default()
+        });
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("rekey unpublished");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+
+        let plan = plan(&ctx, None, false).unwrap();
+        let outcomes = run(&ctx, plan, false).unwrap();
+
+        let Outcome::Failed(why) = &outcomes[1].1 else {
+            panic!("{outcomes:?}");
+        };
+        assert!(
+            why.starts_with("it has new keys, but NinjaOne didn't show them within"),
+            "{why}"
+        );
+        assert_eq!(outcomes[2], ("POS 002".to_owned(), Outcome::Rekeyed));
     }
 
     #[test]

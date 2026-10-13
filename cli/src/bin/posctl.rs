@@ -1,7 +1,7 @@
 //! `posctl`: on-demand SSH sessions to NinjaOne-managed POS machines. Design: `docs/design.md`.
 
 use std::io::IsTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
@@ -180,6 +180,20 @@ fn main() -> Result<()> {
             if result.deferred() {
                 bail!("the install on {name} was deferred: see its report above");
             }
+            // `connect` reads the POS's keys and version from NinjaOne, which shows what the install
+            // wrote well after its result (design section 8).
+            if !result.published().is_empty() {
+                eprintln!(
+                    "Waiting for NinjaOne to show what {name} published (usually under a minute)..."
+                );
+            }
+            let deadline = Instant::now() + timing.published;
+            if !api.await_published(device.id, &result, deadline, timing.poll) {
+                bail!(
+                    "{name} is installed, but NinjaOne didn't show what it published within {}: `posctl connect` fails until it does",
+                    humantime::format_duration(timing.published)
+                );
+            }
         }
         command => {
             let config = Config::load()?;
@@ -337,6 +351,10 @@ fn main() -> Result<()> {
                             bail!("nothing was rekeyed");
                         }
                     }
+                    eprintln!(
+                        "Rekeying {} POS(es); each is done once NinjaOne shows its new keys (about a minute)...",
+                        plan.targets.len()
+                    );
                     let mut failed = 0;
                     for (pos, outcome) in rekey::run(&ctx, plan, force)? {
                         match outcome {
