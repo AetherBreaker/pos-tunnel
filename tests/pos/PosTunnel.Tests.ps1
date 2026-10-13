@@ -417,3 +417,25 @@ Describe 'Rekey' {
         (Invoke-Action Close).ExitCode | Should -Be 0
     }
 }
+
+Describe 'Set-FileContent' {
+    It 'replaces a file whole, and keeps the old one when the new one cannot be written' {
+        . "$RepoRoot\pos\package\Common.ps1"
+        $dir = Join-Path $env:TEMP "pt-setfile-$PID"
+        $null = New-Item -ItemType Directory $dir -Force
+        $path = "$dir\keys"
+        $null = Set-FileContent $path "one`n" @($SystemSid)
+
+        Set-FileContent $path "two`n" @($SystemSid) | Should -BeTrue
+
+        [IO.File]::ReadAllText($path) | Should -Be "two`n"
+        Test-Acl $path @($SystemSid) | Should -BeTrue
+        "$path.new" | Should -Not -Exist
+        # The place the new file is written to is taken, so this write cannot happen.
+        $null = New-Item -ItemType Directory "$path.new"
+        Set-Content "$path.new\x" 'x'
+        { Set-FileContent $path "three`n" @($SystemSid) } | Should -Throw
+        [IO.File]::ReadAllText($path) | Should -Be "two`n"
+        Remove-Item -Recurse -Force $dir
+    }
+}
