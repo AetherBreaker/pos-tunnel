@@ -576,7 +576,13 @@ impl Api {
             .or(done["message"].as_str())
             .unwrap_or_default()
             .replace("\r\n", "\n");
-        let output = output.trim_end().to_owned();
+        // The POS's words go to the operator's terminal: never with the control characters, escape
+        // sequences among them, that could drive it.
+        let output: String = output
+            .trim_end()
+            .chars()
+            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+            .collect();
         // Both: NinjaOne's verdict follows the exit code, and a `FAILED` line is the script's own word.
         let success = done["activityResult"] == "SUCCESS"
             && !output.lines().any(|line| line.starts_with("FAILED\t"));
@@ -1051,5 +1057,23 @@ mod tests {
         );
         // The sign-in at the start and the two after a refusal.
         assert_eq!(fake.requests_to("POST", "/ws/oauth/token").len(), 3);
+    }
+
+    #[test]
+    fn control_characters_in_a_scripts_output_are_dropped() {
+        let activities: Activities = Default::default();
+        let fake = activity_tenant(&activities, |device, activities| {
+            activities.push(activity(1, device, "START_REQUESTED", "s", json!({})));
+            // A clear-screen sequence and a bell, as a compromised POS might print.
+            let output = "OK\tfolder\u{1b}[2J\r\nOK\tcurrent\u{7}\tversion 4";
+            activities.push(completed(2, device, "s", "SUCCESS", output));
+            204
+        });
+        let api = Api::with_token(&fake.url, "t");
+        let mut run = api.start_script(1, 93, INVOKE_SCRIPT, "").unwrap();
+
+        let got = api.poll_script(&mut run).unwrap().unwrap();
+
+        assert_eq!(got.output, "OK\tfolder[2J\nOK\tcurrent\tversion 4");
     }
 }
