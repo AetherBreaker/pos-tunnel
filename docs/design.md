@@ -395,9 +395,11 @@ itself, outside `versions\`, so it survives upgrades.
 2. Resolve the device via the NinjaOne API: exact display-name match among POS devices (section 8),
    exactly one, online. Read its device fields; a missing or malformed `posTunnelRelayKey` or
    `posTunnelHostKey` means the install hasn't run: say so and name `posctl update`.
-3. `tunnelctl status`. A lease for the port that is this workstation's own session (section 8,
-   session state): print the alias, the time left and whether the tunnel is up; done. Any other lease
-   is another workstation's session: join it (below) instead of steps 4 to 7.
+3. `tunnelctl status`. A lease out of time (closed or expired) is a session that has ended, which the
+   daemon drops at its next pass: wait up to a minute for it to go. A lease for the port that is this
+   workstation's own session (section 8, session state): print the alias, the time left and whether
+   the tunnel is up; done. Any other lease is another workstation's session: join it (below) instead
+   of steps 4 to 7.
 4. Generate a session key pair into the session state dir.
 5. `tunnelctl open <port> <id> <idle-seconds> <POS relay public key>`.
 6. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
@@ -510,10 +512,9 @@ non-zero exit.
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
 
 Resolve the device and refuse an offline one before anything is closed. Then `close`; stop there if
-the POS didn't confirm its teardown. Wait until `tunnelctl status` no longer lists the lease (the
-daemon drops a closed lease at its next pass, and `open` refuses while it exists), then go on as
-`connect` from its step 4, with `tunnelctl open … --rebuild`. New session key, new relay lease, new
-72h maximum. Logged distinctly by `tunnelctl`. Other operators on the session are cut off and
+the POS didn't confirm its teardown. Then go on as `connect` from its step 3, which waits for the
+daemon to drop the lease just closed, with `tunnelctl open … --rebuild`. New session key, new relay
+lease, new 72h maximum. Logged distinctly by `tunnelctl`. Other operators on the session are cut off and
 `connect` again to join the new one.
 
 This defeats the 72h maximum, so an agent should not run it on its own. `rebuild` always prints a
