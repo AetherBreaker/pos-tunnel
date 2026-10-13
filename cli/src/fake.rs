@@ -18,10 +18,12 @@ use crate::session::{Context, Timing};
 use crate::workstation::Workstation;
 
 type Handler = dyn Fn(&str, &str, &Value) -> (u16, Value) + Send + 'static;
+/// A request's method, path with query, JSON body and `Authorization` header.
+type Request = (String, String, Value, String);
 
 pub struct Fake {
     pub url: String,
-    requests: Arc<Mutex<Vec<(String, String, Value)>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
 }
 
 impl Fake {
@@ -48,23 +50,29 @@ impl Fake {
                     words.next().unwrap_or("").to_owned(),
                 );
                 let mut length = 0;
+                let mut authorization = String::new();
                 loop {
                     let mut header = String::new();
                     reader.read_line(&mut header).unwrap();
                     if header.trim().is_empty() {
                         break;
                     }
-                    if let Some((name, value)) = header.split_once(':')
-                        && name.eq_ignore_ascii_case("content-length")
-                    {
+                    let Some((name, value)) = header.split_once(':') else {
+                        continue;
+                    };
+                    if name.eq_ignore_ascii_case("content-length") {
                         length = value.trim().parse().unwrap();
+                    } else if name.eq_ignore_ascii_case("authorization") {
+                        authorization = value.trim().to_owned();
                     }
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
                 let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
                 let (status, reply) = handler(&method, &path, &body);
-                log.lock().unwrap().push((method, path, body));
+                log.lock()
+                    .unwrap()
+                    .push((method, path, body, authorization));
                 let text = match &reply {
                     Value::Null => String::new(),
                     // A string is a plain-text body, as GitHub's raw file host sends.
@@ -86,8 +94,18 @@ impl Fake {
         let requests = self.requests.lock().unwrap();
         requests
             .iter()
-            .filter(|(m, p, _)| m == method && p == path)
-            .map(|(_, _, body)| body.clone())
+            .filter(|(m, p, _, _)| m == method && p == path)
+            .map(|(_, _, body, _)| body.clone())
+            .collect()
+    }
+
+    /// The `Authorization` header of each request made with `method` to `path`, in order.
+    pub fn authorizations_to(&self, method: &str, path: &str) -> Vec<String> {
+        let requests = self.requests.lock().unwrap();
+        requests
+            .iter()
+            .filter(|(m, p, _, _)| m == method && p == path)
+            .map(|(_, _, _, authorization)| authorization.clone())
             .collect()
     }
 }
