@@ -404,8 +404,9 @@ itself, outside `versions\`, so it survives upgrades.
 5. `tunnelctl open <port> <id> <idle-seconds> <POS relay public key>`.
 6. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
 7. Wait up to 3 minutes (NinjaOne's dispatch is typically tens of seconds), polling the script's
-   result (section 8, script results) and `tunnelctl status` until the port is listening. A failed
-   result ends the wait at once.
+   result (section 8, script results) and `tunnelctl status`, until the POS has reported success and
+   the port is listening. Not the port alone: the previous session's tunnel can still hold it until
+   `Open` replaces it. A failed result ends the wait at once.
 8. Write the alias (section 8) and log in through it once (`ssh <alias> exit`, up to 2 minutes). That
    checks the POS's SSH server public key and the session key before anyone relies on them, and takes
    the first login's wait, when Windows creates `support`'s profile.
@@ -811,7 +812,8 @@ takes an empty `parameters`. On the test POS with package version 3 (2026-10-13)
 including its login, the first ever as `support`; `keepalive` and `close` 12 s; `rebuild` 24 s;
 `rekey --force` 28 s; `update` 16 s with nothing to install; the alias answering from both Windows'
 and Git Bash's `ssh`; `Rekey` refusing a session left on the POS alone, and the next `connect` using
-the keys it republished. As `support` over the tunnel, the SYSTEM-only state folder can be listed and
+the keys it republished; a `connect` straight after the lease was closed on the relay alone, the old
+tunnel still holding the port, waiting for the lease to go and for `Open`'s report (24 s). As `support` over the tunnel, the SYSTEM-only state folder can be listed and
 its files' times read (the logon's token has every administrator privilege enabled, the backup
 privilege among them), while reading `session.json` and setting `lease`'s time are denied. Windows'
 `ssh` refuses a private key file whose ACL has an `OWNER RIGHTS` entry, which a file inherits in a
