@@ -5,8 +5,8 @@ dial out to a hardened SSH relay; the operator (or a coding agent on the operato
 connects through the relay. Sessions have a 12-hour idle timeout, renewable up to a 72-hour maximum,
 and leave nothing enabled on the POS when they end.
 
-**Status:** the relay, the POS package and `posctl-admin` are implemented; `posctl`'s session commands
-(`connect`, `keepalive`, `status`, `close`, `rebuild`, `update`, `rekey`) are not yet.
+**Status:** the relay, the POS package, `posctl-admin` and `posctl` are implemented. Two operators
+sharing a session needs POS package version 4 on the POS.
 
 - [`docs/design.md`](docs/design.md): the design (threat model, keys, timers, flows).
 - [`cli/`](cli/): `posctl`, the Rust CLI run on the operator workstation.
@@ -22,12 +22,17 @@ private index), released with `poe release`. After changing anything in `pos/pac
 `poe sign-pos` (needs `POS_TUNNEL_SIGNING_KEY`) and commit the re-signed `pos/manifest.json`; CI
 rejects an unsigned or stale manifest.
 
-## Usage (planned)
+## Usage
 
 ```powershell
 posctl login
 posctl connect "Store 42 Register 1"      # exact, case-sensitive NinjaOne display name
 ssh pos-store-42-register-1 "Get-Service"
+posctl status
 posctl keepalive "Store 42 Register 1"
 posctl close "Store 42 Register 1"
 ```
+
+`connect` on a POS another operator is already on joins their session, and `close` ends it for
+everyone on it. `rebuild`, `update` and `rekey` are in `posctl --help`. An operator key with a
+passphrase has to be in `ssh-agent` (`ssh-add`); `posctl` says so when it isn't.

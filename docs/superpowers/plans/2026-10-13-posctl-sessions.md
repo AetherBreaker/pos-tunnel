@@ -4274,7 +4274,7 @@ EOF
 - Consumes: the whole branch.
 - Produces: a pushed branch with every CI job green, a run against the real test POS, and an open pull request.
 
-- [ ] **Step 1: Bring the README up to date**
+- [x] **Step 1: Bring the README up to date**
 
 ```diff
 --- a/README.md
