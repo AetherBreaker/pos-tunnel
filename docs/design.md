@@ -12,7 +12,7 @@ operator workstation                    relay (VPS container)                 PO
   posctl ──NinjaOne API──────────────────────────────────────────────────────▶ Open script (SYSTEM)
   posctl ──ssh ctl@relay──▶ tunnelctl open/renew/close
                             127.0.0.1:<port> ◀──ssh -N -R (tunnel@relay)───── Link task
-  ssh pos-x ──ProxyJump jump@relay──▶ 127.0.0.1:<port> ═══════════════════════▶ sshd on 127.0.0.1:22
+  ssh pos-x ──through jump@relay────▶ 127.0.0.1:<port> ═══════════════════════▶ sshd on 127.0.0.1:22
 ```
 
 ## 1. Components
@@ -82,9 +82,13 @@ setting may be tampering.
 
 - Tunnel port = `20000 + <NinjaOne device ID>`. Fixed per device, no allocation state, no collisions.
   `posctl` refuses device IDs above 45535.
-- Local SSH alias: `pos-<slug of display name>`. The display name argument is matched exactly
-  (case-sensitive) against NinjaOne's device display name; zero or multiple matches is an error listing
-  what was found. A device with no display name is not addressable by name.
+- Local SSH alias: the display name's slug (lower case, every run of other characters one `-`),
+  prefixed `pos-` unless it already starts so: `POS 000 Test` is `pos-000-test`. An empty slug becomes
+  `pos-<device id>`, and one that another session on this workstation already has gets `-<device id>`
+  appended.
+- The display name argument is matched exactly (case-sensitive) against NinjaOne's device display
+  name; zero or multiple matches is an error listing what was found. A device with no display name is
+  not addressable by name.
 
 ## 5. Timers
 
@@ -143,7 +147,7 @@ setting may be tampering.
 | User     | Who       | Allowed                                                                                                                                         |
 | -------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `tunnel` | every POS | remote forwarding of its own port only. No shell, no command, no local forwarding.                                                              |
-| `jump`   | operator  | local forwarding (`ProxyJump`) to `localhost` only. No shell.                                                                                   |
+| `jump`   | operator  | local forwarding (the alias's hop, section 8) to `localhost` only. No shell.                                                                    |
 | `ctl`    | operator  | `tunnelctl` only (forced command; arguments via `SSH_ORIGINAL_COMMAND`; `ExposeAuthInfo` tells it which operator key logged in). No forwarding. |
 
 Global: key auth only, no root login, `AllowUsers tunnel jump ctl`, `GatewayPorts no`, no agent/X11/
@@ -386,18 +390,29 @@ itself, outside `versions\`, so it survives upgrades.
 
 ### 7.2 `posctl connect <DisplayName> [--idle-timeout <dur>]`
 
-1. Resolve the device via the NinjaOne API: exact display-name match among POS devices (section 8),
-   exactly one, online.
-2. Read its custom fields; error if setup hasn't run.
-3. Generate a session key pair into the local session state dir.
-4. `ssh ctl@relay tunnelctl open <port> <id> <idle-seconds> <relay pubkey>`.
-5. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
-6. Poll `tunnelctl status <port>` until listening (timeout ~3 min; NinjaOne script dispatch is slow).
-   On timeout: `tunnelctl close`, report. If `tunnelctl` reports the relay starting, `connect` and
-   `status` say so and that the POS retries within 2 minutes, and a timeout says to retry `connect`
-   rather than failing bare.
-7. Write `~/.ssh/posctl/config` entry and `~/.ssh/posctl/known_hosts` line (section 8).
-8. Print the alias.
+1. Check the operator key is usable (section 8): one with a passphrase that `ssh-agent` doesn't hold
+   stops here, with the commands that add it. Every command that calls the relay starts this way.
+2. Resolve the device via the NinjaOne API: exact display-name match among POS devices (section 8),
+   exactly one, online. Read its device fields; a missing or malformed `posTunnelRelayKey` or
+   `posTunnelHostKey` means the install hasn't run: say so and name `posctl update`.
+3. `tunnelctl status`. A lease for the port that is this workstation's own session (section 8,
+   session state): print the alias, the time left and whether the tunnel is up; done. Any other lease:
+   refuse, naming the operator who opened it.
+4. Generate a session key pair into the session state dir.
+5. `tunnelctl open <port> <id> <idle-seconds> <POS relay public key>`.
+6. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
+7. Wait up to 3 minutes (NinjaOne's dispatch is typically tens of seconds), polling the script's
+   result (section 8, script results) and `tunnelctl status` until the port is listening. A failed
+   result ends the wait at once.
+8. Write the alias (section 8) and log in through it once (`ssh <alias> exit`, up to 2 minutes). That
+   checks the POS's SSH server public key and the session key before anyone relies on them, and takes
+   the first login's wait, when Windows creates `support`'s profile.
+9. Print the alias and both deadlines.
+
+A failure after step 5 undoes the session as `close` does (section 7.5) and prints what the POS
+reported, so `connect` leaves a working alias or nothing. If `tunnelctl` reports the relay starting
+(section 6.4), `connect` and `status` say so and that the POS retries within 2 minutes, and a timeout
+then says to run `connect` again.
 
 **`Open -Port <port> -IdleSeconds <s> -SessionKey <base64>`** (POS, SYSTEM; the session key is the bare
 base64 of the ed25519 public key, so NinjaOne's parameter string needs no quoting): validate parameters
@@ -444,26 +459,40 @@ others wait 10 minutes. A script run in-process by the holder (`Install-PosTunne
 
 ### 7.3 `posctl keepalive <DisplayName>`
 
-1. `tunnelctl renew <port>`. On failure stop and report — the relay lease is the one that counts.
-2. Touch the POS lease over the tunnel: `ssh pos-x` setting `lease`'s `LastWriteTime`.
-3. If step 2 fails (tunnel down), run `Invoke-PosTunnel -Action Touch` via the NinjaOne API instead.
-4. Print the new idle deadline and the time left before the 72h maximum.
+1. `tunnelctl renew <port>`. On failure stop and report: the relay lease is the one that counts.
+2. Run `Invoke-PosTunnel -Action Touch` via the NinjaOne API and wait up to 2 minutes for its result.
+   Not over the tunnel: the lease file is in the SYSTEM-only state folder, which `support` can't open.
+   If the POS doesn't confirm, say so and exit non-zero: the relay lease is renewed, but the POS ends
+   its side at its own idle deadline unless a later `keepalive` reaches it.
+3. Print the idle time left and the time left before the 72h maximum, both from the relay's reply.
 
 ### 7.4 `posctl status [<DisplayName>]`
 
-`tunnelctl status`, plus the POS lease age when the tunnel is up.
+`tunnelctl status`, one line per lease (with a name, that POS's alone): display name, the alias where
+this workstation holds the session, the operator who opened it, the idle time left, the time left
+before the 72h maximum, and whether the tunnel is up. Names come from the NinjaOne device list;
+nothing is read from the POS.
 
 ### 7.5 `posctl close <DisplayName>`
 
-`tunnelctl close <port>` → NinjaOne API run `Invoke-PosTunnel -Action Close`
-(tears down at once: `Stop-Session`, as `Watch` does on expiry) → remove the local config and
-`known_hosts` entries and the session key.
+1. `tunnelctl close <port>`, if the relay holds a lease for it: no login from then on, and the tunnel
+   is cut within about a minute (section 6.5). A relay that can't be reached stops `close` here.
+2. Run `Invoke-PosTunnel -Action Close` via the NinjaOne API and wait up to 2 minutes for its result
+   (tears down at once: `Stop-Session`, as `Watch` does on expiry). Also without a lease, which cleans
+   up a session left on the POS alone. Skipped for an offline POS, which tears down at its own idle
+   deadline.
+3. Remove the alias, the `known_hosts` line and the session state.
+
+Any operator can close any session. A POS that doesn't confirm is reported after step 3, with a
+non-zero exit.
 
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
 
-`close`, wait until `tunnelctl status` shows the port released (the killer runs every minute), then
-`connect --rebuild`. New session key, new relay lease, new 72h maximum. Logged distinctly by
-`tunnelctl`.
+Resolve the device and refuse an offline one before anything is closed. Then `close`; stop there if
+the POS didn't confirm its teardown. Wait until `tunnelctl status` no longer lists the lease (the
+daemon drops a closed lease at its next pass, and `open` refuses while it exists), then go on as
+`connect` from its step 4, with `tunnelctl open … --rebuild`. New session key, new relay lease, new
+72h maximum. Logged distinctly by `tunnelctl`.
 
 This defeats the 72h maximum, so an agent should not run it on its own. `rebuild` always prints a
 warning addressed to AI agents: it resets the 72h maximum, and an agent should not proceed unless the
@@ -484,15 +513,26 @@ configuration.
   `config.toml` from it.
 - `relay set <host>[:<port>] <public key>`: points this workstation's `posctl` at a relay. The line
   `relay point` prints is this command, ready to send to the other operators.
-- `update`: runs `Install-PosTunnel` on the device via the NinjaOne API (section 7.1).
+- `update <DisplayName>`: runs `Install-PosTunnel` on the device via the NinjaOne API (section 7.1),
+  waits up to 15 minutes for its result (a first install downloads and installs OpenSSH) and prints
+  the POS's report. It exits non-zero unless the install completed: a failed step, or a deferred one
+  (a session is open, or a restart is pending).
 
-### 7.8 `posctl rekey <DisplayName> | --all`
+### 7.8 `posctl rekey <DisplayName> | --all [--force] [--yes]`
 
-Runs `Invoke-PosTunnel -Action Rekey` on the device (with `--all`, every POS): regenerates the POS
+Runs `Invoke-PosTunnel -Action Rekey` on the device and waits for its result: regenerates the POS
 relay key pair and the POS SSH server key pair (`ssh-keygen -A` after deleting the old ones), then
-republishes `posTunnelRelayKey` and `posTunnelHostKey`. Refused on a device with an open session
-(skipped and reported under `--all`). For after a reimage or a suspected leak; rekeying a POS that
-is still compromised gains nothing, since the attacker reads the new private keys.
+republishes `posTunnelRelayKey` and `posTunnelHostKey`. For after a reimage or a suspected leak;
+rekeying a POS that is still compromised gains nothing, since the attacker reads the new private keys.
+
+- A POS in a session is refused: `posctl` refuses one with a relay lease, and `Rekey` itself one
+  with a `session.json`. `--force` ends the session first, as `close` does and whoever opened it,
+  then rekeys. It runs `Close` on the POS with or without a relay lease, so a session left on the POS
+  alone doesn't block it.
+- `--all`: every online POS of the organization, started together, one result line each. Offline
+  POSes and, without `--force`, those in a session are skipped and listed. It first says how many it
+  will rekey and how many sessions it will end, then asks `y/N` at a terminal and requires `--yes`
+  elsewhere. It exits non-zero if any POS failed.
 
 ### 7.9 `posctl-admin`
 
@@ -549,7 +589,14 @@ ready to paste into Coolify.
   API base URL (region-specific) and Native client ID, the organization ID, the POS policy ID and the
   library script IDs for `Install-PosTunnel` and `Invoke-PosTunnel` (written by `posctl-admin init`);
   relay host, port and public key (set by `relay keygen` on the admin's workstation,
-  `operator import` or `relay set` on others); operator private key path.
+  `operator import` or `relay set` on others); operator private key path. With `POSCTL_CONFIG_HOME`
+  set, the NinjaOne refresh token is a user-only file in that dir on every platform, not Windows
+  Credential Manager: a second identity gets its own sign-in, and a test never reads the real one.
+- Session state: `posctl/sessions/<device id>/` in the config dir holds `session_key` and
+  `session.toml` (display name, alias, the POS's SSH server public key, and the lease's `started` as
+  the relay reported it). A lease with that `started` is this workstation's session; none, or another
+  `started`, means it ended or was reopened elsewhere, and every command that reads `tunnelctl
+  status` then drops the state and the alias with it.
 - One organization: the system works on a single NinjaOne organization, named at `init`. Only its
   devices are listed and only its fleet fields written; nothing of another organization is read or
   changed. What stays tenant-wide is what NinjaOne scopes no narrower: the six custom field
@@ -571,24 +618,57 @@ ready to paste into Coolify.
   - `PATCH /v2/organization/{id}/custom-fields`: the fleet fields (`posctl-admin`).
   - Scripts are read-only through the API (`GET /v2/automation/scripts`), hence the fixed library
     scripts (section 7.1).
-- `~/.ssh/config` needs `Include posctl/config` above any `Host` block (once, by hand).
-- Generated entry:
+  - Script results: `script/run` returns nothing to follow a run by. `posctl` notes the device's
+    newest activity before the request (`lastNodeActivityId` of `GET /v2/device/{id}/activities`),
+    takes as its run the oldest `START_REQUESTED` activity after it that names the script, and polls
+    that `seriesUid` for the `COMPLETED` activity: `activityResult` and the script's output
+    (`data.message.params.output_message`). The series, not the script name alone, since a late
+    `Open` and the `Close` that follows a timed-out `connect` are both `Invoke-PosTunnel`. A POS's
+    output is untrusted (section 2): printed as the POS's report and read only for its `FAILED` and
+    `DEFERRED` line prefixes. An offline POS is refused before any script is requested (`close`
+    skips its script instead, and `rekey --all` skips the POS).
+- `ssh`: `posctl` runs OpenSSH's client non-interactively (`BatchMode`). On Windows that is the one in
+  `System32\OpenSSH` (else `Program Files\OpenSSH`, else `PATH`), never Git Bash's, which can't reach
+  the Windows `ssh-agent`. An operator key with a passphrase must be in `ssh-agent` (`ssh-add`, once:
+  the Windows agent keeps keys across restarts); `posctl` checks before any relay call and prints the
+  commands. Keys from `operator add` have no passphrase.
+- `~/.ssh/posctl/config` and `~/.ssh/posctl/known_hosts` are generated: every session command
+  rewrites both whole from the config and the session state, and nothing edits them. `connect` adds
+  `Include posctl/config` at the top of `~/.ssh/config` (creating the file) unless that line already
+  precedes every `Host` and `Match` block, and says so. `POSCTL_SSH_DIR` replaces `~/.ssh` (tests).
+- Generated entries, the second once per session this workstation holds:
 
 ```
+Host posctl-relay
+  HostName <relay host>
+  Port <relay port>
+  User jump
+  IdentityFile "<operator private key>"
+  IdentitiesOnly yes
+  HostKeyAlias posctl-relay
+  UserKnownHostsFile "<ssh dir>/posctl/known_hosts"
+  StrictHostKeyChecking yes
+  BatchMode yes
+
 Host pos-<slug>
   HostName localhost
   Port <port>
   User support
-  ProxyJump posctl-relay
-  IdentityFile <session dir>/session_key
+  ProxyCommand "<ssh>" -F "<ssh dir>/posctl/config" -W "[%h]:%p" posctl-relay
+  IdentityFile "<session dir>/session_key"
   IdentitiesOnly yes
   HostKeyAlias pos-<device id>
-  UserKnownHostsFile ~/.ssh/posctl/known_hosts
+  UserKnownHostsFile "<ssh dir>/posctl/known_hosts"
   StrictHostKeyChecking yes
   BatchMode yes
 ```
 
-  plus a `posctl-relay` entry (`jump@<relay>:<port>`, operator private key, relay public key pinned).
+  Paths are absolute, forward-slashed and quoted, since a profile path may hold a space. `ProxyCommand`,
+  not `ProxyJump`: Windows' client hands its own `-F` to the jump unquoted, which a spaced path breaks,
+  and naming the client makes the alias work from Git Bash's `ssh` too, whose jump then still runs in
+  Windows' client, with the agent. `posctl` reaches `tunnelctl` through the same file
+  (`ssh -F <config> ctl@posctl-relay tunnelctl …`), so the relay's address and pinned public key are
+  written in one place.
 
 - Windows OpenSSH has no `ControlMaster`, so each command is a full handshake through the jump
   (roughly 1–2 s).
@@ -606,7 +686,13 @@ Host pos-<slug>
   doesn't restart an unhealthy app yet).
 - The relay can't start while the central log server is unreachable (`aeth_ext` exits at startup);
   `restart: always` brings it up within about a minute of the log server returning.
-- `connect` takes as long as NinjaOne takes to dispatch a script (typically tens of seconds).
+- `connect`, `keepalive` and `close` each take as long as NinjaOne takes to dispatch a script
+  (typically tens of seconds); a POS's first `connect` also waits for Windows to create `support`'s
+  profile.
+- `status` shows the relay's view only: the POS's state folder is SYSTEM-only, so its own idle
+  deadline can't be read. A POS that missed a `keepalive` ends its side early while the relay lease
+  stands.
+- A session's alias exists only on the workstation that opened it.
 - `relay point` ends every open session.
 - Commands run in a session aren't recorded: the relay sees only encrypted traffic, and recording on
   the POS was judged not worth its cost.
@@ -618,7 +704,7 @@ Host pos-<slug>
 - **Joining the existing WireGuard hub:** would put untrusted POS machines on the same network as the
   office database PC.
 - **NinjaOne API only (no SSH):** no network exposure, but tens of seconds per command and awkward
-  output retrieval. Kept as the fallback path for `Touch`/`Close` only.
+  output retrieval. Kept for the per-session actions only (`Open`, `Touch`, `Close`, `Rekey`).
 - **Rust binary on the POS:** adds allowlisting, signing and fleet update problems for no gain over
   NinjaOne scripts plus a signed release.
 - **SSH certificates** (a CA key pair whose private key signs other public keys): for session auth, a
@@ -678,19 +764,36 @@ the same device objects as `GET /v2/devices`, with the same `pageSize` and `afte
 that doesn't exist it returns an empty list, not an error, which is why `init` takes the
 organization by name. GitHub's raw file host serves `refs/tags/<tag>/<path>` for a tag and answers
 404 there for a branch, a commit or a missing tag (checked on public repositories, without
-credentials); it caches an answer for five minutes. Still open:
+credentials); it caches an answer for five minutes. On the operator's workstation (Windows 11,
+OpenSSH 9.5): `ssh_config` takes a double-quoted, forward-slashed path holding a space for
+`IdentityFile` and `UserKnownHostsFile`; `ProxyJump` passes the caller's `-F` path to the jump
+unquoted, so a spaced path fails there, while a `ProxyCommand` naming `ssh.exe` with a quoted `-F`
+works, also when Git Bash's `ssh` runs it; Git Bash's `ssh` can't reach the Windows agent and is
+refused with a passphrase-protected operator key; with that key in the Windows `ssh-agent`, a
+`BatchMode` login as `ctl` with `IdentitiesOnly` and the key file as `IdentityFile` succeeds.
+NinjaOne's `GET /v2/device/{id}/activities` lists newest first, at least 10 a page; `newerThan=<id>`
+(exclusive), `activityType`, `status` and `seriesUid` filter it; `lastNodeActivityId` is the device's
+newest activity; one script run is three activities sharing a `seriesUid` (`ACTIONSET`
+`START_REQUESTED` naming the requesting user, then `ACTION` `STARTED` and `COMPLETED`), the last with
+`activityResult` and the script's output in `data.message.params.output_message` (a 900-character
+report arrived whole). Still open:
 
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
+- `activityResult` for a script that exits non-zero (expected `FAILURE`; `posctl` reads the `FAILED`
+  lines as well, so it doesn't depend on it).
+- What `script/run` answers for an offline device (`posctl` refuses one before asking).
+- How long the first `support` login takes on a POS (`connect` allows 2 minutes).
 
 ## 12. Deployment order
 
-1. Admin key: generate the admin's operator key pair by hand (`ssh-keygen -t ed25519`) and commit its
-   public key as `cli/admin.pub`, which `posctl-admin` is built with.
+1. Admin key: generate the admin's operator key pair by hand (`ssh-keygen -t ed25519`; given a
+   passphrase, also `ssh-add` it, section 8) and commit its public key as `cli/admin.pub`, which
+   `posctl-admin` is built with.
 2. NinjaOne: paste `Install-PosTunnel` and `Invoke-PosTunnel` into the library; create a Native
    client app (redirect `http://127.0.0.1`, scopes Monitoring, Management and Offline Access, grant
-   types Authorization Code and Refresh Token); `posctl-admin init` (it signs in); add the
-   `Include`. The first fleet-field write creates the custom fields.
+   types Authorization Code and Refresh Token); `posctl-admin init` (it signs in). The first
+   fleet-field write creates the custom fields.
 3. Release: `poe sign-pos`; commit; `poe release`. Once per signing key, not per release:
    `posctl-admin signing publish <tag>` with a release's tag makes the fleet trust the key that release
    is signed with (`signing keygen` writes a new key at once).
