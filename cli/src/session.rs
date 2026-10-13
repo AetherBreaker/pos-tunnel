@@ -205,10 +205,24 @@ fn open(
         None
     } else {
         let flag = if rebuild { " --rebuild" } else { "" };
-        Some(relay::ask(
-            ctx.relay,
-            &format!("open {port} {} {seconds} {pos_key}{flag}", device.id),
-        )?)
+        let open = format!("open {port} {} {seconds} {pos_key}{flag}", device.id);
+        match relay::ask(ctx.relay, &open) {
+            Ok(lease) => Some(lease),
+            Err(e) => {
+                // Refused for a lease that wasn't there at the look above: another operator's
+                // `connect` got in between.
+                let theirs = relay::leases(ctx.relay)
+                    .ok()
+                    .and_then(|leases| leases.into_iter().find(|lease| lease.port == port));
+                match theirs {
+                    Some(lease) => bail!(
+                        "{} opened a session on {name} a moment ago: run `posctl connect \"{name}\"` again to join it",
+                        lease.operator
+                    ),
+                    None => return Err(e),
+                }
+            }
+        }
     };
     let joining = opened.is_none();
 
@@ -229,16 +243,23 @@ fn open(
             let deadline = Instant::now() + ctx.timing.open;
             let mut reported = false;
             loop {
-                if !reported && let Some(result) = ctx.api.poll_script(&mut run)? {
-                    if !result.success {
-                        bail!(
+                // A look that fails, at NinjaOne or at the relay, is one more "not yet": a session
+                // isn't undone for one dropped call. What the last look failed with is said if the
+                // wait runs out.
+                let mut trouble = None;
+                if !reported {
+                    match ctx.api.poll_script(&mut run) {
+                        Ok(Some(result)) if !result.success => bail!(
                             "{name} couldn't open the session. It reported:\n{}",
                             result.output
-                        );
+                        ),
+                        Ok(Some(_)) => reported = true,
+                        Ok(None) => {}
+                        Err(e) => trouble = Some(e),
                     }
-                    reported = true;
                 }
-                let starting = match relay::leases(ctx.relay) {
+                let mut starting = false;
+                match relay::leases(ctx.relay) {
                     // By `started` too: another lease on the port is an operator's who closed this
                     // one and opened their own.
                     Ok(leases) => match leases
@@ -248,18 +269,23 @@ fn open(
                         // Only once the POS has reported: a tunnel on the port before that is the
                         // previous session's, still connected, which `Open` is about to replace.
                         Some(lease) if reported && lease.listening => break lease,
-                        Some(_) => false,
+                        Some(_) => {}
                         None => bail!(
                             "the relay dropped the lease while {name} was opening the session"
                         ),
                     },
-                    Err(e) if e.is::<Starting>() => true,
-                    Err(e) => return Err(e),
-                };
+                    Err(e) if e.is::<Starting>() => starting = true,
+                    Err(e) => trouble = Some(e),
+                }
                 if Instant::now() >= deadline {
                     let waited = humantime::format_duration(ctx.timing.open);
                     if starting {
                         bail!("{Starting}. Run `posctl connect \"{name}\"` again in a few minutes");
+                    }
+                    if let Some(e) = trouble {
+                        return Err(e.context(format!(
+                            "{name}'s session couldn't be followed to the end of the {waited} wait"
+                        )));
                     }
                     if reported {
                         bail!(
@@ -284,6 +310,18 @@ fn open(
                     "{name} couldn't add this workstation to the session. It reported:\n{}\nIf the session has ended on the POS, `posctl close \"{name}\"` ends its relay lease, and `posctl connect` then opens a new one",
                     joined.output
                 );
+            }
+            // The login below needs the session's tunnel, which may be down for the moment: the POS
+            // restores one that dropped within about 2 minutes.
+            let deadline = Instant::now() + ctx.timing.open;
+            let up = |leases: Vec<Lease>| leases.iter().any(|l| l.port == port && l.listening);
+            while !relay::leases(ctx.relay).is_ok_and(up) {
+                if Instant::now() >= deadline {
+                    bail!(
+                        "{name} added this workstation to the session, but the session's tunnel is down. The POS restores a dropped tunnel within about 2 minutes: run `posctl connect \"{name}\"` again then"
+                    );
+                }
+                std::thread::sleep(ctx.timing.poll);
             }
             lease
         };
@@ -357,6 +395,11 @@ fn open(
 pub fn keepalive(ctx: &Context, name: &str) -> Result<Lease> {
     let device = fleet::find_pos(ctx.api, ctx.ninja, name)?;
     let port = relay::port(&device)?;
+    let leases = relay::leases(ctx.relay)?;
+    ctx.workstation.reconcile(&leases)?;
+    if !leases.iter().any(|lease| lease.port == port) {
+        bail!("{name} has no open session: `posctl connect \"{name}\"` opens one");
+    }
     let lease: Lease = relay::ask(ctx.relay, &format!("renew {port}"))?;
     let unconfirmed = if device.offline {
         Some("it is offline".to_owned())
@@ -438,9 +481,9 @@ pub fn close(ctx: &Context, name: &str) -> Result<Closed> {
 /// without a lease too, which cleans up a session left on the POS alone.
 pub(crate) fn end(ctx: &Context, device: &Device) -> Result<Closed> {
     let port = relay::port(device)?;
-    let had_lease = relay::leases(ctx.relay)?
-        .iter()
-        .any(|lease| lease.port == port);
+    let leases = relay::leases(ctx.relay)?;
+    ctx.workstation.reconcile(&leases)?;
+    let had_lease = leases.iter().any(|lease| lease.port == port);
     if had_lease {
         ctx.relay.tunnelctl(&format!("close {port}"))?;
     }
@@ -736,7 +779,7 @@ mod tests {
         assert_eq!(connected.how, How::Joined);
         assert_eq!(connected.lease.operator, "Jacob");
         // No second lease: the idle timer restarts and the POS adds this workstation's key.
-        assert_eq!(relay.calls(), ["status", "renew 20001"]);
+        assert_eq!(relay.calls(), ["status", "renew 20001", "status"]);
         let session_key = keys::public_of_file(&ws.session_key(1)).unwrap();
         assert_eq!(
             tenant.requests_to("POST", "/v2/device/1/script/run")[0]["parameters"],
@@ -819,7 +862,7 @@ mod tests {
         let lease = keepalive(&context(&api, &relay, &ws), "POS 000 Test").unwrap();
 
         assert_eq!(lease.idle_remaining, 43200);
-        assert_eq!(relay.calls(), ["renew 20001"]);
+        assert_eq!(relay.calls(), ["status", "renew 20001"]);
         assert_eq!(
             tenant.requests_to("POST", "/v2/device/1/script/run")[0]["parameters"],
             "-Action Touch"
@@ -837,9 +880,9 @@ mod tests {
         let api = Api::with_token(&tenant.url, "t");
         let ctx = context(&api, &relay, &ws);
 
-        // No lease: the relay refuses, and the POS isn't asked.
+        // No lease: nothing is renewed, and the POS isn't asked.
         let error = keepalive(&ctx, "POS 000 Test").unwrap_err().to_string();
-        assert!(error.contains("no lease for port 20001"), "{error}");
+        assert!(error.contains("has no open session"), "{error}");
         assert!(
             tenant
                 .requests_to("POST", "/v2/device/1/script/run")
@@ -1150,5 +1193,137 @@ mod tests {
         assert_eq!(connected.how, How::Opened);
         assert_eq!(relay.count("renew"), 0);
         assert_eq!(ws.pending(1), None);
+    }
+
+    #[test]
+    fn one_failed_look_does_not_end_the_wait() {
+        // NinjaOne fails one look at the run, and the wait's first look at the relay never arrives.
+        let (tenant, _) = pos_tenant(Pos {
+            flaky_looks: 1,
+            ..Pos::default()
+        });
+        let relay = FakeRelay::new("Jacob");
+        relay.unreachable_at.set(Some(3));
+        let ws = workstation("connect flaky");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let connected = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE).unwrap();
+
+        assert_eq!(connected.how, How::Opened);
+        assert_eq!(*relay.logins.borrow(), ["pos-000-test"]);
+    }
+
+    #[test]
+    fn a_joiner_waits_for_the_tunnel() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Bob");
+        relay.open_as("Jacob", 1);
+        // Down while the POS restores it: up at the fourth look.
+        relay.up_after.set(3);
+        let ws = workstation("join waits");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let connected = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE).unwrap();
+
+        assert_eq!(connected.how, How::Joined);
+        assert!(relay.count("status") >= 4, "{:?}", relay.calls());
+        assert_eq!(*relay.logins.borrow(), ["pos-000-test"]);
+    }
+
+    #[test]
+    fn a_join_whose_tunnel_stays_down_says_so_and_ends_nothing() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Bob");
+        relay.open_as("Jacob", 1);
+        relay.listening.set(false);
+        let ws = workstation("join down");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let error = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("the session's tunnel is down") && error.contains("again then"),
+            "{error}"
+        );
+        assert!(relay.logins.borrow().is_empty());
+        assert_eq!(relay.count("close"), 0);
+        assert_eq!(relay.leases.borrow().len(), 1);
+        assert!(ws.held().unwrap().is_empty());
+    }
+
+    /// Leaves `ws` holding a session on device 2 that the relay knows nothing of.
+    fn hold_an_ended_session(ws: &Workstation, pos: &Pos) {
+        let session = Session {
+            device_id: 2,
+            name: "POS 002".into(),
+            alias: "pos-002".into(),
+            host_key: pos.host_key.clone(),
+            started: "long ago".into(),
+        };
+        ws.save(&session, &keys::generate("stale").unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn close_and_keepalive_drop_the_state_of_a_session_that_ended_elsewhere() {
+        let (tenant, pos) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("close reconciles");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+        connect(&ctx, "POS 000 Test", MAX_IDLE).unwrap();
+
+        hold_an_ended_session(&ws, &pos);
+        keepalive(&ctx, "POS 000 Test").unwrap();
+        assert_eq!(ws.held().unwrap().len(), 1);
+
+        hold_an_ended_session(&ws, &pos);
+        close(&ctx, "POS 000 Test").unwrap();
+        assert!(ws.held().unwrap().is_empty());
+    }
+
+    #[test]
+    fn keepalive_without_a_session_says_so_and_names_connect() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("keepalive none");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let error = keepalive(&context(&api, &relay, &ws), "POS 000 Test")
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "POS 000 Test has no open session: `posctl connect \"POS 000 Test\"` opens one"
+        );
+        assert_eq!(relay.count("renew"), 0);
+    }
+
+    #[test]
+    fn losing_the_race_to_open_says_who_won_and_to_connect_again() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        // Bob's `open` lands between this connect's look at the leases and its own.
+        relay.raced_after.set(Some(1));
+        let ws = workstation("connect raced");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let error = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            error,
+            "Bob opened a session on POS 000 Test a moment ago: run `posctl connect \"POS 000 Test\"` again to join it"
+        );
+        assert_eq!(relay.count("close"), 0);
+        assert!(
+            tenant
+                .requests_to("POST", "/v2/device/1/script/run")
+                .is_empty()
+        );
     }
 }

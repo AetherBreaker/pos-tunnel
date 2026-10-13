@@ -40,6 +40,7 @@ pub fn plan(ctx: &Context, name: Option<&str>, force: bool) -> Result<Plan> {
         None => fleet::pos_devices(ctx.api, ctx.ninja)?,
     };
     let leases = relay::leases(ctx.relay)?;
+    ctx.workstation.reconcile(&leases)?;
     let mut plan = Plan {
         targets: Vec::new(),
         skipped: Vec::new(),
@@ -91,10 +92,13 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
     };
     let mut targets: Vec<Device> = Vec::new();
     if force {
+        // The leases as they are now, not as planned: `--all` may have waited at its prompt since.
+        let leases = relay::leases(ctx.relay)?;
         let mut closing = Vec::new();
-        for (device, port) in plan.targets {
-            let closed = port.map_or(Ok(String::new()), |port| {
-                ctx.relay.tunnelctl(&format!("close {port}"))
+        for (device, _) in plan.targets {
+            let lease = leases.iter().find(|lease| lease.device_id == device.id);
+            let closed = lease.map_or(Ok(String::new()), |lease| {
+                ctx.relay.tunnelctl(&format!("close {}", lease.port))
             });
             match closed {
                 Ok(_) => closing.push(device),
@@ -386,5 +390,68 @@ mod tests {
             "{why}"
         );
         assert_eq!(outcomes[2], ("POS 002".to_owned(), Outcome::Rekeyed));
+    }
+
+    #[test]
+    fn force_ends_a_session_opened_after_the_plan_was_made() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("rekey late session");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+        let plan = plan(&ctx, Some("POS 000 Test"), true).unwrap();
+        // While `--all` waits at its prompt.
+        relay.open_as("Bob", 1);
+
+        let outcomes = run(&ctx, plan, true).unwrap();
+
+        assert_eq!(outcomes, [("POS 000 Test".to_owned(), Outcome::Rekeyed)]);
+        assert_eq!(relay.count("close"), 1);
+        assert!(relay.leases.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_report_cut_short_of_its_field_lines_fails_that_rekey() {
+        let (tenant, _) = pos_tenant(Pos {
+            cut_report: true,
+            ..Pos::default()
+        });
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("rekey cut report");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+
+        let plan = plan(&ctx, Some("POS 000 Test"), false).unwrap();
+        let outcomes = run(&ctx, plan, false).unwrap();
+
+        let Outcome::Failed(why) = &outcomes[0].1 else {
+            panic!("{outcomes:?}");
+        };
+        assert!(
+            why.starts_with("it has new keys, but its report came without the lines for them"),
+            "{why}"
+        );
+    }
+
+    #[test]
+    fn planning_drops_the_state_of_a_session_that_ended_elsewhere() {
+        let (tenant, pos) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("rekey reconciles");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+        let session = crate::workstation::Session {
+            device_id: 2,
+            name: "POS 002".into(),
+            alias: "pos-002".into(),
+            host_key: pos.host_key.clone(),
+            started: "long ago".into(),
+        };
+        ws.save(&session, &crate::keys::generate("stale").unwrap())
+            .unwrap();
+
+        plan(&ctx, Some("POS 000 Test"), false).unwrap();
+
+        assert!(ws.held().unwrap().is_empty());
     }
 }
