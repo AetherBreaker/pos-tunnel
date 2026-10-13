@@ -413,7 +413,8 @@ itself, outside `versions\`, so it survives upgrades.
    result (section 8, script results) and `tunnelctl status`, until the POS has reported success and
    the lease of step 5 is listening. Not the port alone: the previous session's tunnel can still hold
    it until `Open` replaces it, and another lease on it is an operator's who closed this one and
-   opened their own. A failed result ends the wait at once.
+   opened their own. A failed result ends the wait at once. A look that fails, at NinjaOne or at the
+   relay, does not: it is one more "not yet", and the last one's error is what a timeout reports.
 8. Write the alias (section 8) and log in through it once (`ssh <alias> exit`, up to 2 minutes). That
    checks the POS's SSH server public key and the session key before anyone relies on them, and takes
    the first login's wait, when Windows creates `support`'s profile.
@@ -435,12 +436,16 @@ operator through to any tunnel, so only the POS has to accept a second key. `con
 another workstation's lease generates its own session key pair, runs `tunnelctl renew <port>` (the
 idle timer restarts as for `keepalive`, and the relay's log names the joiner), then
 `Invoke-PosTunnel -Action Open -Mode Join -Port … -SessionKey …`, waits for its result, and goes on
-with steps 8 and 9. `--idle-timeout` applies only to the `connect` that opens the session, and the
+with steps 8 and 9, once the session's tunnel is up: the POS may be restoring one that dropped
+(section 9), and a joiner that finds it still down after 3 minutes is told to `connect` again.
+`--idle-timeout` (whole seconds, 1 s to 12 h: the relay counts in seconds) applies only to the
+`connect` that opens the session, which `connect` says when it is given for any other, and the
 72h maximum counts from it. A POS whose `posTunnelVersion` is below 4 has no join mode: `connect`
 refuses and names `posctl update`, to run once the session has ended (`Install-PosTunnel` defers
 under one). A failed join removes only the joiner's own state: the session isn't its to close.
 Both refusals name `posctl close`, for a lease whose session has ended on the POS or that nobody is
-using.
+using. Two operators' `connect`s for an idle POS can both find no lease; the relay grants one, and the
+other is told who opened the session and to `connect` again, which joins it.
 
 **`Open -Port <port> -IdleSeconds <s> -SessionKey <base64>`** (POS, SYSTEM; the session key is the bare
 base64 of the ed25519 public key, so NinjaOne's parameter string needs no quoting): validate parameters
@@ -494,7 +499,8 @@ others wait 10 minutes. A script run in-process by the holder (`Install-PosTunne
 
 ### 7.3 `posctl keepalive <DisplayName>`
 
-1. `tunnelctl renew <port>`. On failure stop and report: the relay lease is the one that counts.
+1. `tunnelctl status`, then `tunnelctl renew <port>`. A POS with no lease has no session: say so and
+   name `connect`. On failure stop and report: the relay lease is the one that counts.
 2. Run `Invoke-PosTunnel -Action Touch` via the NinjaOne API and wait up to 2 minutes for its result.
    Not over the tunnel: the lease file is in the SYSTEM-only state folder, where `support` can list
    files and read their times (its `ssh` logon has the backup privilege enabled) but not write one.
@@ -565,12 +571,13 @@ republishes `posTunnelRelayKey` and `posTunnelHostKey`. For after a reimage or a
 rekeying a POS that is still compromised gains nothing, since the attacker reads the new private keys.
 A POS counts as rekeyed once NinjaOne shows the keys it republished (section 8), about a minute in
 all: until then a `connect` would give the relay the old relay public key, and the tunnel could
-never come up.
+never come up. A POS that has new keys which NinjaOne didn't show in time, or whose report NinjaOne
+cut short of them, is listed as failed with that said: it needs no second rekey.
 
 - A POS in a session is refused: `posctl` refuses one with a relay lease, and `Rekey` itself one
   with a `session.json`. `--force` ends the session first, as `close` does and whoever opened it,
   then rekeys. It runs `Close` on the POS with or without a relay lease, so a session left on the POS
-  alone doesn't block it.
+  alone doesn't block it, and closes the leases the relay holds when it runs, not when `--all` asked.
 - `--all`: every online POS of the organization, started together, one result line each. Offline
   POSes and, without `--force`, those in a session are skipped and listed. It first says how many it
   will rekey and how many sessions it will end, then asks `y/N` at a terminal and requires `--yes`
@@ -632,7 +639,7 @@ ready to paste into Coolify.
   library script IDs for `Install-PosTunnel` and `Invoke-PosTunnel` (written by `posctl-admin init`);
   relay host, port and public key (set by `relay keygen` on the admin's workstation,
   `operator import` or `relay set` on others); operator private key path. With `POSCTL_CONFIG_HOME`
-  set, the NinjaOne refresh token is a file in that dir on every platform (mode 0600 on Unix; on
+  set, the NinjaOne sign-in (below) is files in that dir on every platform (mode 0600 on Unix; on
   Windows as private as the dir), not Windows Credential Manager: a second identity gets its own
   sign-in, and a test never reads the real one.
 - Session state: `posctl/sessions/<device id>/` in the config dir holds `session_key` and
@@ -641,7 +648,9 @@ ready to paste into Coolify.
   `started`, means it ended or was reopened elsewhere, and every command that reads `tunnelctl
   status` then drops the state and the alias with it. While `connect` is opening a session, or
   undoing one, the dir holds `pending`, the `started` of the lease it opened (section 7.2, step 5);
-  a dir with `pending` is not a held session, whatever else is in it.
+  a dir with `pending` is not a held session, whatever else is in it. Two commands at once (an
+  operator's beside a coding agent's) take turns, on a file lock in the config dir, to rewrite the
+  generated files and to add the `Include`, each from the state as it then is.
 - One organization: the system works on a single NinjaOne organization, named at `init`. Only its
   devices are listed and only its fleet fields written; nothing of another organization is read or
   changed. What stays tenant-wide is what NinjaOne scopes no narrower: the six custom field
@@ -664,9 +673,14 @@ ready to paste into Coolify.
   - Scripts are read-only through the API (`GET /v2/automation/scripts`), hence the fixed library
     scripts (section 7.1).
   - Script results: `script/run` returns nothing to follow a run by. `posctl` notes the device's
-    newest activity before the request (`lastNodeActivityId` of `GET /v2/device/{id}/activities`),
-    takes as its run the oldest `START_REQUESTED` activity after it that names the script, and polls
-    that `seriesUid` for the `COMPLETED` activity: `activityResult` and the script's output
+    newest activity before the request (`lastNodeActivityId` of `GET /v2/device/{id}/activities`,
+    or the newest one listed), takes as its run the oldest `START_REQUESTED` activity after it that
+    names the script, and polls that `seriesUid` for the `COMPLETED` activity. Oldest by this
+    operator's NinjaOne user where that is known, since another operator's request for the same
+    script can land between the two calls: the activity carries `userId`, the API has no way to
+    ask who is signed in, and so `posctl` learns its user from a request that stands alone and
+    keeps it with the sign-in. A look that fails is one more "not yet". The result is
+    `activityResult` and the script's output
     (`data.message.params.output_message`). The series, not the script name alone, since a late
     `Open` and the `Close` that follows a timed-out `connect` are both `Invoke-PosTunnel`. A POS's
     output is untrusted (section 2): printed as the POS's report and read only for its `FAILED` and
@@ -679,16 +693,24 @@ ready to paste into Coolify.
     and `Install-PosTunnel`, `posctl` takes each `CHANGED<TAB>field <name><TAB><value>` line of the
     output and polls the device's fields until they show those values, for up to 3 minutes, before
     it reports success. The POS's word is only compared with what NinjaOne shows, never used as a
-    key. A `connect` from another workstation inside that minute still reads the old values
-    (section 9).
-  - Signing in again: a refresh ends the access tokens issued before it (section 11), so a second
-    `posctl` of the same identity, the operator's beside a coding agent's, cuts the first one off
-    mid-command. A call answered `401` therefore signs in again and is repeated, up to twice.
+    key. Both scripts end with a line for each device field, changed or not; a report without them
+    was cut short by NinjaOne and says nothing of what was written, so `posctl` says that instead
+    of taking it for "nothing changed". A `connect` from another workstation inside that minute
+    still reads the old values (section 9).
+  - The sign-in, as stored: the refresh token, the current access token, and the NinjaOne user ID
+    learned above. A refresh ends the access tokens issued before it (section 11), so commands of
+    one identity, the operator's beside a coding agent's, share one: a command signs in only when
+    none is stored, and a call answered `401` takes the token another command has stored since,
+    or signs in and stores its own, and is repeated, up to twice. `login` clears the other two.
+    Only a refresh NinjaOne answers `400` or `401` is told to `posctl login`.
 - `ssh`: `posctl` runs OpenSSH's client non-interactively (`BatchMode`). On Windows that is the one in
   `System32\OpenSSH` (else `Program Files\OpenSSH`, else `PATH`), never Git Bash's, which can't reach
   the Windows `ssh-agent`. An operator key with a passphrase must be in `ssh-agent` (`ssh-add`, once:
   the Windows agent keeps keys across restarts); `posctl` checks before any relay call and prints the
-  commands. Keys from `operator add` have no passphrase.
+  commands, for PowerShell, with the path of the `ssh-add` beside that client. Keys from
+  `operator add` have no passphrase. Every call ends at a limit, 30 s for a `tunnelctl` command and
+  2 minutes for a login: `ConnectTimeout` covers the connection only, and a stalled relay
+  (section 6.5) would otherwise hang the command.
 - `~/.ssh/posctl/config` and `~/.ssh/posctl/known_hosts` are generated: every session command
   rewrites both whole from the config and the session state, and nothing edits them. `connect` adds
   `Include posctl/config` at the top of `~/.ssh/config` (creating the file) unless that line already
@@ -866,7 +888,12 @@ started the moment it returned (21 s); a `rekey` that two `status` commands over
 all the same. Windows' `ssh` (9.5) skips a UTF-8 byte-order mark at the start of a config file and
 rejects the file with one anywhere else; Git Bash's (10.5) rejects it at the start too. A
 `connect` killed from Git Bash while it waited for the POS left its lease, and in three of five
-tries had started its own undo first; the next `connect` ended the lease and opened anew (30 s). As
+tries had started its own undo first; the next `connect` ended the lease and opened anew (30 s).
+NinjaOne's access token is 87 opaque characters; no endpoint says who is signed in (`/v2/user/current`
+and its like answer 404), while a run's `START_REQUESTED` activity carries the requester's `userId`.
+In Windows PowerShell 5.1, `Move-Item -Force` over an existing file leaves the moved file's own ACL
+on it (`Set-FileContent`). With the access token shared, a `keepalive` that two `status` commands
+overlapped finished. As
 `support` over the tunnel, the SYSTEM-only state folder can be listed and
 its files' times read (the logon's token has every administrator privilege enabled, the backup
 privilege among them), while reading `session.json` and setting `lease`'s time are denied. Windows'
@@ -879,7 +906,8 @@ directory Python made owner-only (pytest's `tmp_path`); the per-user config dir 
 - How long NinjaOne can take to show a written field at worst: 39 s is one measurement, and
   `posctl` waits 3 minutes.
 - Where NinjaOne cuts a script's output off. A 900-character report arrived whole; the field lines
-  `rekey` and `update` wait on are the last of a report, and a first install's is the longest.
+  `rekey` and `update` wait on are the last of a report, and a first install's is the longest. A
+  report cut short of them is said to be, not waited on.
 - Joining on a real POS: package version 4 isn't released yet. Its `Open -Mode Join` runs in the POS
   package's integration tests, and `posctl`'s side against a stand-in POS (`tests/cli`).
 
