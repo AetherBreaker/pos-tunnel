@@ -95,18 +95,23 @@ function Test-Acl([string]$Path, [string[]]$FullControl, [string[]]$ReadOnly = @
 }
 
 # Writes ASCII $Content to $Path unless it already holds exactly that (and, given $FullControl, exactly
-# New-Acl's ACL); returns whether it changed. Recreates the file rather than overwriting it, so an ACL
-# someone else gave it doesn't survive, and creates it with its ACL, so it is never briefly open.
+# New-Acl's ACL); returns whether it changed. Replaces the file rather than overwriting it, so an ACL
+# someone else gave it doesn't survive, and creates the new one with its ACL, so it is never briefly open.
+# The new one is written beside the file and moved over it: a write that fails (a full disk) leaves the
+# old file, which for administrators_authorized_keys during a join is the first operator's way back in.
 function Set-FileContent([string]$Path, [string]$Content, [string[]]$FullControl = @(), [string[]]$ReadOnly = @()) {
     $bytes = [Text.Encoding]::ASCII.GetBytes($Content)
     if (Test-Path -LiteralPath $Path) {
         $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -eq [Convert]::ToBase64String($bytes)
         if ($same -and (-not $FullControl -or (Test-Acl $Path $FullControl $ReadOnly))) { return $false }
-        Remove-Item -LiteralPath $Path -Force
     }
-    $stream = if ($FullControl) { [IO.File]::Create($Path, 4096, [IO.FileOptions]::None, (New-Acl $FullControl $ReadOnly)) }
-        else { [IO.File]::Create($Path) }
+    $new = "$Path.new"
+    # One left by a run that died part-way.
+    if (Test-Path -LiteralPath $new) { Remove-Item -LiteralPath $new -Force }
+    $stream = if ($FullControl) { [IO.File]::Create($new, 4096, [IO.FileOptions]::None, (New-Acl $FullControl $ReadOnly)) }
+        else { [IO.File]::Create($new) }
     try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Close() }
+    Move-Item -LiteralPath $new -Destination $Path -Force
     return $true
 }
 
