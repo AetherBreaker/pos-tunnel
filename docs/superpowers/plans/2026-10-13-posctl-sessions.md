@@ -2748,7 +2748,7 @@ EOF
 - Consumes: `session::Context`; `relay::leases`; `Relay::tunnelctl`; `Api::run_scripts`; `fleet::{find_pos, pos_devices}`; `Workstation::{remove, write_ssh_files}`; the Task 2 test stand-ins.
 - Produces (`posctl::rekey`): `Plan { pub targets: Vec<(Device, Option<u16>)>, pub skipped: Vec<(String, String)> }` (each target with the port of the relay lease to close first, if any; each skipped POS by name with why); `Outcome { Rekeyed, Skipped(String), Failed(String) }`; `plan(&Context, name: Option<&str>, force: bool) -> Result<Plan>`; `run(&Context, Plan, force: bool) -> Result<Vec<(String, Outcome)>>`.
 
-- [ ] **Step 1: Add the module**
+- [x] **Step 1: Add the module**
 
 In `cli/src/lib.rs`, between `pub mod ninja;` and `pub mod relay;`:
 
@@ -2756,7 +2756,7 @@ In `cli/src/lib.rs`, between `pub mod ninja;` and `pub mod relay;`:
 pub mod rekey;
 ```
 
-- [ ] **Step 2: Write the tests**
+- [x] **Step 2: Write the tests**
 
 Create `cli/src/rekey.rs` holding only its tests module:
 
@@ -2938,12 +2938,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 3: Run them to watch them fail**
+- [x] **Step 3: Run them to watch them fail**
 
 Run: `cargo test --lib rekey 2>&1 | grep -E "^error" | sort -u | head -5`
 Expected: compile errors, such as `` error[E0425]: cannot find function `plan` in this scope ``.
 
-- [ ] **Step 4: Write `rekey.rs`**
+- [x] **Step 4: Write `rekey.rs`**
 
 Above the tests module:
 
@@ -3087,7 +3087,7 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
 }
 ```
 
-- [ ] **Step 5: Check and commit**
+- [x] **Step 5: Check and commit**
 
 Run `cargo fmt`, then the check. Expected: `test result: ok. 80 passed`, nothing from clippy or fmt.
 
