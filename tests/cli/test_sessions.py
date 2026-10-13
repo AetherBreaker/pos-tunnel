@@ -25,6 +25,8 @@ INSTALL_SCRIPT = 2
 BOTH_OPERATORS = 2
 # How long the fake NinjaOne still shows a field's old value after a script wrote it; the real one took 39 s (design 11).
 FIELD_LAG = 2.0
+# An install's lines for the device fields when none changed; posctl takes a report without them for one cut short.
+UNCHANGED_FIELDS = "OK\tfield posTunnelRelayKey\r\nOK\tfield posTunnelHostKey\r\nOK\tfield posTunnelVersion"
 
 
 class Pos:
@@ -74,7 +76,7 @@ class Pos:
     output = f"FAILED\tinvoke\tunexpected {parameters}"
     match script == INSTALL_SCRIPT, named.get("-Action"), named.get("-Mode", "New"):
       case True, _, _:
-        output = "OK\tsignature\r\nOK\tcurrent\tversion 4"
+        output = f"OK\tsignature\r\n{UNCHANGED_FIELDS}\r\nOK\tcurrent\tversion 4"
       case _, "Open", "New":
         self.exec("sh", "-c", f"echo 'ssh-ed25519 {named['-SessionKey']}' > /etc/ssh/session_keys")
         sh(
@@ -95,7 +97,8 @@ class Pos:
         output = "CHANGED\tlease\trenewed"
       case _, "Rekey", _:
         self.exec("sh", "-c", "rm -f /root/relay_key /root/relay_key.pub && ssh-keygen -q -t ed25519 -N '' -C '' -f /root/relay_key")
-        output = f"CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{self.public_key('/root/relay_key.pub')}"
+        relay_key = self.public_key("/root/relay_key.pub")
+        output = f"CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{relay_key}\r\nOK\tfield posTunnelHostKey\r\nOK\tfield posTunnelVersion"
       case _:
         pass
     return output
@@ -342,5 +345,5 @@ def test_rekey_refuses_a_pos_in_a_session_and_force_ends_it_first(stack: Stack):
 def test_update_prints_the_installs_report(stack: Stack):
   result = stack.posctl(stack.admin, "update", "POS 1")
 
-  assert result.stdout.splitlines() == ["OK\tsignature", "OK\tcurrent\tversion 4"]
+  assert result.stdout.splitlines() == ["OK\tsignature", *UNCHANGED_FIELDS.splitlines(), "OK\tcurrent\tversion 4"]
   stack.posctl(stack.admin, "close", "POS 1")
