@@ -4240,7 +4240,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] **Step 5: The user signs the package (version 4)**
+- [x] **Step 5: The user signs the package (version 4)**
 
 The release signing key has a passphrase, so the user runs this in PowerShell from the repository root; it rewrites `pos/manifest.json` (version 3 to 4, new hashes for `Open.ps1` and `Close.ps1`) and its `.sig`:
 
@@ -4371,7 +4371,16 @@ If Step 2 or Step 3 showed behaviour that `docs/design.md` describes differently
 
 **Result:** `c6414e1` records both faults and their answers in sections 7.7, 7.8, 8, 9 and 11.
 
-- [ ] **Step 5: Open the pull request (needs the user's go-ahead)**
+**Branch review (2026-10-13):** a fresh reviewer read the whole branch before the package was signed: nothing critical, and nothing in the POS package. Fixed with tests (`e5c7382`, `958e9eb`, `912fc65`; spec in `3a503d0`):
+
+- A `connect` that is cut off left a lease the next `connect` misread as someone else's session. It now notes the lease it opened and the next `connect` here replaces it. Checked on the test POS by killing `connect` at 6 s and at 9 s; the first try showed the note being deleted by the dying command's own undo, which is fixed too.
+- A waiting `connect` could adopt, then close, a lease another operator had opened on the port meanwhile. It now goes by the lease's `started`.
+- `Include posctl/config` went in front of a byte-order mark in `~/.ssh/config`, which broke every `ssh` on the workstation. The mark stays first.
+- The generated entries now say `ForwardAgent no`, and control characters are dropped from a POS's report.
+
+Left for later, in the order they matter: tolerate a failed poll before the first fleet-wide `rekey --all`; a joiner should wait for the tunnel; an overall timeout on relay calls.
+
+- [x] **Step 5: Open the pull request (needs the user's go-ahead)** — https://github.com/AetherBreaker/pos-tunnel/pull/2, opened before the signature so the review could start; its manifest check is red until Task 5 Step 5
 
 ```bash
 gh pr create --base main --head feat/posctl-sessions --title "feat(cli): posctl session commands; operators share a session" --body-file - <<'EOF'
