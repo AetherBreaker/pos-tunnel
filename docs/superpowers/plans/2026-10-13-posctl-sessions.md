@@ -4320,7 +4320,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 EOF
 ```
 
-- [ ] **Step 2: Push and watch CI (needs the user's go-ahead to push)**
+- [x] **Step 2: Push and watch CI (needs the user's go-ahead to push)**
 
 ```bash
 git push -u origin feat/posctl-sessions
