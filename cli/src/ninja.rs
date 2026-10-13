@@ -4,8 +4,10 @@
 //! Running a script needs a user's token (a client-credentials token gets `user_context_required`), so
 //! `login` signs in with the authorization-code grant through the tenant's Native app: PKCE (RFC 7636),
 //! no client secret, a loopback redirect on a port the OS picks (RFC 8252). Refresh tokens don't rotate,
-//! so the one `login` stores lasts; each command trades it for an hour's access token.
+//! so the one `login` stores lasts; each command trades it for an hour's access token. A refresh ends
+//! the access tokens issued before it, so a call answered 401 signs in again (`Api::call`).
 
+use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
@@ -171,6 +173,30 @@ fn token_request<T: DeserializeOwned>(base_url: &str, form: &[(&str, &str)]) -> 
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Trades the refresh token for an access token.
+fn sign_in(base_url: &str, client_id: &str, refresh: &str) -> Result<String> {
+    let tokens: Value = token_request(
+        base_url,
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", client_id),
+            ("refresh_token", refresh),
+        ],
+    )
+    .map_err(|e| {
+        // Signing in again cures a refusal, not an unreachable NinjaOne.
+        if e.chain().any(|cause| cause.is::<ureq::Error>()) {
+            e.context(format!("couldn't reach NinjaOne at {base_url}"))
+        } else {
+            e.context("refreshing the NinjaOne sign-in failed; run `posctl login`")
+        }
+    })?;
+    tokens["access_token"]
+        .as_str()
+        .map(str::to_owned)
+        .context("NinjaOne returned no access token")
+}
+
 fn snippet(body: &str) -> String {
     body.chars().take(300).collect()
 }
@@ -230,7 +256,9 @@ pub mod token_store {
 pub struct Api {
     agent: Agent,
     base_url: String,
-    access_token: String,
+    access_token: RefCell<String>,
+    /// The client ID and refresh token `call` signs in again with; none for a test's fixed token.
+    refresh: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -317,30 +345,11 @@ impl Api {
 
     /// `connect` without the token store, so a test never touches a real sign-in.
     pub fn with_refresh_token(base_url: &str, client_id: &str, refresh: &str) -> Result<Api> {
-        let tokens: Value = token_request(
-            base_url,
-            &[
-                ("grant_type", "refresh_token"),
-                ("client_id", client_id),
-                ("refresh_token", refresh),
-            ],
-        )
-        .map_err(|e| {
-            // Signing in again cures a refusal, not an unreachable NinjaOne.
-            if e.chain().any(|cause| cause.is::<ureq::Error>()) {
-                e.context(format!("couldn't reach NinjaOne at {base_url}"))
-            } else {
-                e.context("refreshing the NinjaOne sign-in failed; run `posctl login`")
-            }
-        })?;
-        let access_token = tokens["access_token"]
-            .as_str()
-            .context("NinjaOne returned no access token")?
-            .to_owned();
         Ok(Api {
             agent: agent(),
             base_url: base_url.to_owned(),
-            access_token,
+            access_token: RefCell::new(sign_in(base_url, client_id, refresh)?),
+            refresh: Some((client_id.to_owned(), refresh.to_owned())),
         })
     }
 
@@ -349,30 +358,44 @@ impl Api {
         Api {
             agent: agent(),
             base_url: base_url.to_owned(),
-            access_token: access_token.to_owned(),
+            access_token: RefCell::new(access_token.to_owned()),
+            refresh: None,
         }
     }
 
-    /// One call; the status and body, whatever the status.
+    /// One call; the status and body, whatever the status. NinjaOne ends an access token when the
+    /// sign-in is refreshed again, which a second `posctl` running at the same time does (design
+    /// section 8): a 401 signs in again and repeats the call, twice at most, as the other run may
+    /// refresh once more in between.
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String)> {
         let url = format!("{}{path}", self.base_url);
-        let auth = format!("Bearer {}", self.access_token);
-        let mut response = match (method, body) {
-            ("GET", _) => self.agent.get(&url).header("Authorization", &auth).call()?,
-            ("POST", Some(body)) => self
-                .agent
-                .post(&url)
-                .header("Authorization", &auth)
-                .send_json(body)?,
-            ("PATCH", Some(body)) => self
-                .agent
-                .patch(&url)
-                .header("Authorization", &auth)
-                .send_json(body)?,
-            _ => bail!("unsupported call {method} {path}"),
-        };
-        let status = response.status().as_u16();
-        Ok((status, response.body_mut().read_to_string()?))
+        let mut sign_ins_left = 2;
+        loop {
+            let auth = format!("Bearer {}", self.access_token.borrow());
+            let mut response = match (method, body) {
+                ("GET", _) => self.agent.get(&url).header("Authorization", &auth).call()?,
+                ("POST", Some(body)) => self
+                    .agent
+                    .post(&url)
+                    .header("Authorization", &auth)
+                    .send_json(body)?,
+                ("PATCH", Some(body)) => self
+                    .agent
+                    .patch(&url)
+                    .header("Authorization", &auth)
+                    .send_json(body)?,
+                _ => bail!("unsupported call {method} {path}"),
+            };
+            let status = response.status().as_u16();
+            let text = response.body_mut().read_to_string()?;
+            match &self.refresh {
+                Some((client_id, refresh)) if status == 401 && sign_ins_left > 0 => {
+                    sign_ins_left -= 1;
+                    *self.access_token.borrow_mut() = sign_in(&self.base_url, client_id, refresh)?;
+                }
+                _ => return Ok((status, text)),
+            }
+        }
     }
 
     fn checked(&self, method: &str, path: &str, body: Option<&Value>) -> Result<String> {
@@ -981,5 +1004,52 @@ mod tests {
         // A value NinjaOne never shows runs the wait out.
         let unseen = result("CHANGED\tfield posTunnelRelayKey\tnewer");
         assert!(!api.await_published(1, &unseen, Instant::now() + Duration::from_millis(50), poll));
+    }
+
+    #[test]
+    fn a_call_cut_off_by_another_runs_sign_in_signs_in_again_and_is_repeated() {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (issued, calls) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let fake = crate::fake::Fake::start(move |_, path, _| {
+            if path == "/ws/oauth/token" {
+                let token = format!("t{}", issued.fetch_add(1, SeqCst) + 1);
+                return (200, json!({"access_token": token}));
+            }
+            // Another `posctl` has refreshed the sign-in since, which ended the first call's token.
+            if calls.fetch_add(1, SeqCst) == 0 {
+                return (401, json!({"error": "not_authenticated"}));
+            }
+            (200, json!({"posTunnelVersion": "4"}))
+        });
+        let api = Api::with_refresh_token(&fake.url, "c", "r").unwrap();
+
+        let fields = api.custom_fields(1).unwrap();
+
+        assert_eq!(fields["posTunnelVersion"], "4");
+        assert_eq!(
+            fake.authorizations_to("GET", "/v2/device/1/custom-fields"),
+            ["Bearer t1", "Bearer t2"]
+        );
+    }
+
+    #[test]
+    fn a_call_still_refused_after_two_more_sign_ins_fails() {
+        let fake = crate::fake::Fake::start(|_, path, _| {
+            if path == "/ws/oauth/token" {
+                (200, json!({"access_token": "t"}))
+            } else {
+                (401, json!({"error": "not_authenticated"}))
+            }
+        });
+        let api = Api::with_refresh_token(&fake.url, "c", "r").unwrap();
+
+        let error = api.custom_fields(1).unwrap_err().to_string();
+
+        assert!(
+            error.contains("/v2/device/1/custom-fields failed (401)"),
+            "{error}"
+        );
+        // The sign-in at the start and the two after a refusal.
+        assert_eq!(fake.requests_to("POST", "/ws/oauth/token").len(), 3);
     }
 }
