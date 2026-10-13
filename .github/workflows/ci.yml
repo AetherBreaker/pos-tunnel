@@ -64,7 +64,7 @@ jobs:
         run: Get-WinEvent -LogName OpenSSH/Operational -MaxEvents 300 -ErrorAction SilentlyContinue | Sort-Object TimeCreated | ForEach-Object { "$($_.TimeCreated.ToString('HH:mm:ss')) $($_.Message)" }
 
   cli-integration:
-    name: "posctl: relay setup integration tests (ubuntu-latest)"
+    name: "posctl: relay setup and session integration tests (ubuntu-latest)"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
