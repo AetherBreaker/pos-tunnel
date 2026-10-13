@@ -11,8 +11,10 @@ Install-PosTunnel -Force, as SYSTEM.
 if (-not (Enter-Lock 600)) { Write-Result 'FAILED' 'lock' 'another PosTunnel script held it for 10 minutes'; exit 1 }
 try {
     $open = Test-Path -LiteralPath $SessionFile
+    # One key per operator workstation on the session (section 7.2, joining): close ends it for all.
+    $keys = @(Get-Content -LiteralPath $AuthorizedKeys -ErrorAction SilentlyContinue | Where-Object { $_ }).Count
     Stop-Session
-    Write-Result 'OK' 'close' $(if ($open) { 'session ended' } else { 'no session was open' })
+    Write-Result 'OK' 'close' $(if ($open) { "session ended, $keys session key$(if ($keys -ne 1) { 's' })" } else { 'no session was open' })
 } catch {
     Write-Result 'FAILED' 'close' $_.Exception.Message
 } finally { Exit-Lock }

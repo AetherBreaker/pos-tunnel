@@ -109,15 +109,16 @@ function Wait-Port([int]$Port, [switch]$Closed, [int]$TimeoutSeconds = 60) {
 
 # An operator's ssh through the tunnel: the stand-in relay's forwarded port, the session key, and the
 # POS's published SSH server public key pinned.
-function Get-TunnelSshArgs([string]$Command) {
+function Get-TunnelSshArgs([string]$Command, [string]$Key = 'session_key') {
     Set-Content "$Work\pos_known_hosts" "[127.0.0.1]:$TunnelPort $(Get-Field posTunnelHostKey)" -Encoding ASCII
-    return @('-F', 'none', '-p', "$TunnelPort", '-i', "$Work\session_key", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
+    return @('-F', 'none', '-p', "$TunnelPort", '-i', "$Work\$Key", '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes',
         '-o', "UserKnownHostsFile=$Work\pos_known_hosts", '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=15', 'support@127.0.0.1', $Command)
 }
 
-function Invoke-ThroughTunnel([string]$Command) {
+# -Key: another operator's session key (second_key), for a joined session.
+function Invoke-ThroughTunnel([string]$Command, [string]$Key = 'session_key') {
     $ErrorActionPreference = 'Continue'
-    $output = & "$env:ProgramFiles\OpenSSH\ssh.exe" @(Get-TunnelSshArgs $Command) 2>&1
+    $output = & "$env:ProgramFiles\OpenSSH\ssh.exe" @(Get-TunnelSshArgs $Command $Key) 2>&1
     $result = [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($output | Out-String).Trim() }
     Write-Host "--- ssh support@ $Command -> $($result.ExitCode)`n$($result.Output)"
     return $result
@@ -173,6 +174,7 @@ Export-ModuleMember -Function Ninja-Property-Get, Ninja-Property-Set
     Set-Field posTunnelSigner (New-KeyPair "$Work\signing_key")
     $null = New-KeyPair "$Work\other_signing_key"
     $null = New-KeyPair "$Work\session_key"
+    $null = New-KeyPair "$Work\second_key"
 
     # The stand-in relay: a second sshd, from a copy of Windows' own OpenSSH taken before Setup removes it,
     # with user tunnel allowed only remote forwarding of the POS's port, as section 6.2 configures the

@@ -186,13 +186,42 @@ Describe 'Sessions: Invoke-PosTunnel, Open, Touch, Close' {
         (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
     }
 
-    It 'closes at once, ending the live connection' {
+    It 'refuses a join for another port, leaving the session as it was' {
+        $second = ((Get-Content "$Work\second_key.pub" -Raw).Trim() -split ' ')[1]
+
+        $r = Invoke-Action Open @('-Mode', 'Join', '-Port', "$($TunnelPort + 1)", '-SessionKey', $second)
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tsession`tthe open session is on port $TunnelPort"
+        (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
+        (Invoke-ThroughTunnel 'hostname' 'second_key').ExitCode | Should -Not -Be 0
+    }
+
+    It 'adds a second operator''s key on a join, the first key and the session going on' {
+        $started = (Get-Content "$Root\session.json" -Raw | ConvertFrom-Json).started
+        (Get-Item "$Root\lease").LastWriteTimeUtc = [DateTime]::UtcNow.AddMinutes(-30)
+        $second = ((Get-Content "$Work\second_key.pub" -Raw).Trim() -split ' ')[1]
+        $join = @('-Mode', 'Join', '-Port', "$TunnelPort", '-SessionKey', $second)
+
+        $r = Invoke-Action Open $join
+
+        $r.ExitCode | Should -Be 0
+        $r.Text | Should -Match "CHANGED`tsession key`tadded, 2 session keys"
+        (Invoke-ThroughTunnel 'hostname').ExitCode | Should -Be 0
+        (Invoke-ThroughTunnel 'hostname' 'second_key').ExitCode | Should -Be 0
+        (Get-Content "$Root\session.json" -Raw | ConvertFrom-Json).started | Should -Be $started
+        ([DateTime]::UtcNow - (Get-Item "$Root\lease").LastWriteTimeUtc).TotalSeconds | Should -BeLessThan 60
+        # The same key again changes nothing.
+        (Invoke-Action Open $join).Text | Should -Match "OK`tsession key`talready one of 2"
+    }
+
+    It 'closes at once, ending the live connection and every operator''s key' {
         $live = Start-TunnelSsh 'Start-Sleep 600'
 
         $r = Invoke-Action Close
 
         $r.ExitCode | Should -Be 0
-        $r.Text | Should -Match "OK`tclose`tsession ended"
+        $r.Text | Should -Match "OK`tclose`tsession ended, 2 session keys"
         $live.WaitForExit(30000) | Should -BeTrue
         $state = Get-IdleState
         $state.SshdStatus | Should -Be 'Stopped'
@@ -201,6 +230,19 @@ Describe 'Sessions: Invoke-PosTunnel, Open, Touch, Close' {
         $state.LinkState | Should -Be 'Disabled'
         $state.Session | Should -BeFalse
         Wait-Port $TunnelPort -Closed | Should -BeTrue
+    }
+
+    It 'refuses a join when no session is open, and stays idle' {
+        $second = ((Get-Content "$Work\second_key.pub" -Raw).Trim() -split ' ')[1]
+
+        $r = Invoke-Action Open @('-Mode', 'Join', '-Port', "$TunnelPort", '-SessionKey', $second)
+
+        $r.ExitCode | Should -Be 1
+        $r.Text | Should -Match "FAILED`tsession`tno session is open"
+        $state = Get-IdleState
+        $state.AuthorizedKeys | Should -Be 0
+        $state.SshdStatus | Should -Be 'Stopped'
+        $state.SupportEnabled | Should -BeFalse
     }
 
     It 'refuses to open, and tears down, when sshd would listen beyond loopback' {
