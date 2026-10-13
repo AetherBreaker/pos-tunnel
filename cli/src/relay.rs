@@ -4,7 +4,7 @@
 use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -33,6 +33,8 @@ pub struct Lease {
 const EX_UNAVAILABLE: i32 = 75;
 /// The first login as `support` on a POS waits for Windows to create its profile (design section 7.2).
 const LOGIN_WAIT: Duration = Duration::from_secs(120);
+/// For one `tunnelctl` command, which a healthy relay answers in a second or two.
+const TUNNELCTL_WAIT: Duration = Duration::from_secs(30);
 
 /// The relay's daemon isn't answering yet (design section 6.4).
 #[derive(Debug)]
@@ -87,16 +89,61 @@ pub struct SshRelay {
     pub config: PathBuf,
 }
 
+/// Runs `command` to its end, or kills it at `limit`: `ConnectTimeout` covers the connection only,
+/// and a relay that stalls after it (design section 6.5) would hang `posctl` with nothing said.
+/// What it prints is read as it comes, so a reply longer than a pipe holds can't block it.
+fn run(command: &mut Command, limit: Duration, what: &str) -> Result<Output> {
+    fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    }
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running {}", command.get_program().display()))?;
+    let stdout = child.stdout.take().map(drain);
+    let stderr = child.stderr.take().map(drain);
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!(
+                "{what} didn't come within {}",
+                humantime::format_duration(limit)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let read = |pipe: Option<std::thread::JoinHandle<Vec<u8>>>| {
+        pipe.and_then(|pipe| pipe.join().ok()).unwrap_or_default()
+    };
+    Ok(Output {
+        status,
+        stdout: read(stdout),
+        stderr: read(stderr),
+    })
+}
+
 impl Relay for SshRelay {
     fn tunnelctl(&self, command: &str) -> Result<String> {
-        let out = Command::new(&self.ssh)
-            .arg("-F")
-            .arg(&self.config)
-            .args(["-o", "ConnectTimeout=15", "ctl@posctl-relay", "tunnelctl"])
-            .args(command.split(' '))
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("running {}", self.ssh.display()))?;
+        let out = run(
+            Command::new(&self.ssh)
+                .arg("-F")
+                .arg(&self.config)
+                .args(["-o", "ConnectTimeout=15", "ctl@posctl-relay", "tunnelctl"])
+                .args(command.split(' ')),
+            TUNNELCTL_WAIT,
+            "the relay's answer",
+        )?;
         let stderr = String::from_utf8_lossy(&out.stderr);
         match out.status.code() {
             Some(0) => Ok(String::from_utf8_lossy(&out.stdout).into_owned()),
@@ -111,37 +158,23 @@ impl Relay for SshRelay {
     }
 
     fn login(&self, alias: &str) -> Result<()> {
-        let mut child = Command::new(&self.ssh)
-            .arg("-F")
-            .arg(&self.config)
-            .args(["-o", "ConnectTimeout=30", alias, "exit"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("running {}", self.ssh.display()))?;
-        let deadline = Instant::now() + LOGIN_WAIT;
-        loop {
-            if let Some(status) = child.try_wait()? {
-                if status.success() {
-                    return Ok(());
-                }
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
-                bail!("the login through {alias} failed: {}", stderr.trim());
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                bail!(
-                    "the login through {alias} didn't finish within {}",
-                    humantime::format_duration(LOGIN_WAIT)
-                );
-            }
-            std::thread::sleep(Duration::from_millis(200));
+        let out = run(
+            Command::new(&self.ssh).arg("-F").arg(&self.config).args([
+                "-o",
+                "ConnectTimeout=30",
+                alias,
+                "exit",
+            ]),
+            LOGIN_WAIT,
+            &format!("the login through {alias}"),
+        )?;
+        if !out.status.success() {
+            bail!(
+                "the login through {alias} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
+        Ok(())
     }
 }
 
@@ -174,5 +207,50 @@ mod tests {
             (20001, "Jacob", false)
         );
         assert_eq!(lease.started, "2026-10-13T15:00:00+00:00");
+    }
+
+    #[test]
+    fn a_command_that_never_ends_is_cut_off() {
+        // Half a minute of nothing, as a relay that stalled after the handshake.
+        let mut stalled = if cfg!(windows) {
+            let mut ping = Command::new("ping");
+            ping.args(["-n", "30", "127.0.0.1"]);
+            ping
+        } else {
+            let mut sleep = Command::new("sleep");
+            sleep.arg("30");
+            sleep
+        };
+        let started = Instant::now();
+
+        let error = run(
+            &mut stalled,
+            Duration::from_millis(300),
+            "the relay's answer",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert_eq!(error, "the relay's answer didn't come within 300ms");
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_long_reply_is_read_whole() {
+        // More than a pipe holds (4 KB on Windows): unread, it would block the child for good.
+        let mut long = if cfg!(windows) {
+            let mut cmd = Command::new("cmd");
+            cmd.args(["/c", "for /L %i in (1,1,2000) do @echo 0123456789"]);
+            cmd
+        } else {
+            let mut sh = Command::new("sh");
+            sh.args(["-c", "for i in $(seq 2000); do echo 0123456789; done"]);
+            sh
+        };
+
+        let out = run(&mut long, Duration::from_secs(30), "the reply").unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 2000);
     }
 }
