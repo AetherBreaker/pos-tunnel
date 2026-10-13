@@ -33,6 +33,10 @@ posctl keepalive "Store 42 Register 1"
 posctl close "Store 42 Register 1"
 ```
 
+`connect` usually takes under half a minute and can take six (a slow POS, a first login); a coding
+agent should give it that long rather than cut it off. If it is cut off, the next `connect` ends
+what was left and starts again.
+
 `connect` on a POS another operator is already on joins their session, and `close` ends it for
 everyone on it. `rebuild`, `update` and `rekey` are in `posctl --help`. An operator key with a
 passphrase has to be in `ssh-agent` (`ssh-add`); `posctl` says so when it isn't.
