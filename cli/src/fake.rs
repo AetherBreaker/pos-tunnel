@@ -298,6 +298,11 @@ pub struct FakeRelay {
     pub starting_after: Cell<Option<usize>>,
     /// How many `status` replies still list a closed lease, as the daemon does until its next pass.
     pub linger: Cell<u32>,
+    /// After this many commands another operator has closed every lease and opened their own on its
+    /// port.
+    pub taken_over_after: Cell<Option<usize>>,
+    /// The command after this many panics: the `posctl` asking is cut off there, as by a kill.
+    pub cut_off_after: Cell<Option<usize>>,
     closed: RefCell<Vec<(Lease, u32)>>,
     opened: Cell<u32>,
 }
@@ -313,6 +318,8 @@ impl FakeRelay {
             listening: Cell::new(true),
             starting_after: Cell::new(None),
             linger: Cell::new(0),
+            taken_over_after: Cell::new(None),
+            cut_off_after: Cell::new(None),
             closed: RefCell::default(),
             opened: Cell::new(0),
         }
@@ -350,12 +357,31 @@ impl FakeRelay {
 impl Relay for FakeRelay {
     fn tunnelctl(&self, command: &str) -> Result<String> {
         self.calls.borrow_mut().push(command.to_owned());
+        let answered = self.calls.borrow().len() - 1;
+        assert!(
+            self.cut_off_after
+                .get()
+                .is_none_or(|limit| answered < limit),
+            "cut off at `{command}`"
+        );
         if self
             .starting_after
             .get()
             .is_some_and(|answered| self.calls.borrow().len() > answered)
         {
             return Err(Starting.into());
+        }
+        if self
+            .taken_over_after
+            .get()
+            .is_some_and(|answered| self.calls.borrow().len() > answered)
+        {
+            self.taken_over_after.set(None);
+            for lease in self.leases.borrow_mut().iter_mut() {
+                self.opened.set(self.opened.get() + 1);
+                lease.operator = "Bob".to_owned();
+                lease.started = format!("opened-{}", self.opened.get());
+            }
         }
         let words: Vec<&str> = command.split(' ').collect();
         let port: u16 = words.get(1).map_or(0, |port| port.parse().unwrap());
