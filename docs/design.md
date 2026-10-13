@@ -409,8 +409,9 @@ itself, outside `versions\`, so it survives upgrades.
    the first login's wait, when Windows creates `support`'s profile.
 9. Print the alias and both deadlines.
 
-A failure after step 5 undoes the session as `close` does (section 7.5) and prints what the POS
-reported, so `connect` leaves a working alias or nothing. If `tunnelctl` reports the relay starting
+A failure after step 5 undoes the session, so `connect` leaves a working alias or nothing: it closes
+the lease, asks the POS to `Close` without waiting on a POS that may not answer, removes the local
+state, and prints what the POS reported. If `tunnelctl` reports the relay starting
 (section 6.4), `connect` and `status` say so and that the POS retries within 2 minutes, and a timeout
 then says to run `connect` again.
 
@@ -478,7 +479,8 @@ others wait 10 minutes. A script run in-process by the holder (`Install-PosTunne
 
 1. `tunnelctl renew <port>`. On failure stop and report: the relay lease is the one that counts.
 2. Run `Invoke-PosTunnel -Action Touch` via the NinjaOne API and wait up to 2 minutes for its result.
-   Not over the tunnel: the lease file is in the SYSTEM-only state folder, which `support` can't open.
+   Not over the tunnel: the lease file is in the SYSTEM-only state folder, where `support` can list
+   files and read their times (its `ssh` logon has the backup privilege enabled) but not write one.
    If the POS doesn't confirm, say so and exit non-zero: the relay lease is renewed, but the POS ends
    its side at its own idle deadline unless a later `keepalive` reaches it.
 3. Print the idle time left and the time left before the 72h maximum, both from the relay's reply.
@@ -501,8 +503,8 @@ nothing is read from the POS.
 3. Remove the alias, the `known_hosts` line and the session state.
 
 Any operator can close any session, and that ends it for every operator on it: a shared session has
-no leaving, only closing, so after `close` nobody is on that POS. `Close` reports how many session
-keys it removed, which `close` prints. A POS that doesn't confirm is reported after step 3, with a
+no leaving, only closing, so after `close` nobody is on that POS. From package version 4 `Close`
+reports how many session keys it removed, which `close` prints. A POS that doesn't confirm is reported after step 3, with a
 non-zero exit.
 
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
@@ -710,9 +712,8 @@ Host pos-<slug>
 - `connect`, `keepalive` and `close` each take as long as NinjaOne takes to dispatch a script
   (typically tens of seconds); a POS's first `connect` also waits for Windows to create `support`'s
   profile.
-- `status` shows the relay's view only: the POS's state folder is SYSTEM-only, so its own idle
-  deadline can't be read. A POS that missed a `keepalive` ends its side early while the relay lease
-  stands.
+- `status` shows the relay's view only. A POS that missed a `keepalive` ends its side early while the
+  relay lease stands; `keepalive` reports a POS that didn't confirm, which is where that shows.
 - A session's alias exists only on the workstations that ran `connect` for it.
 - `relay point` ends every open session.
 - Commands run in a session aren't recorded: the relay sees only encrypted traffic, and recording on
@@ -804,14 +805,22 @@ NinjaOne's `GET /v2/device/{id}/activities` lists newest first, at least 10 a pa
 newest activity; one script run is three activities sharing a `seriesUid` (`ACTIONSET`
 `START_REQUESTED` naming the requesting user, then `ACTION` `STARTED` and `COMPLETED`), the last with
 `activityResult` and the script's output in `data.message.params.output_message` (a 900-character
-report arrived whole). Still open:
+report arrived whole); a script that exits non-zero gets `activityResult` `FAILURE`; `script/run`
+takes an empty `parameters`. On the test POS with package version 3 (2026-10-13): `connect` 11 to 15 s
+including its login, the first ever as `support`; `keepalive` and `close` 12 s; `rebuild` 24 s;
+`rekey --force` 28 s; `update` 16 s with nothing to install; the alias answering from both Windows'
+and Git Bash's `ssh`; `Rekey` refusing a session left on the POS alone, and the next `connect` using
+the keys it republished. As `support` over the tunnel, the SYSTEM-only state folder can be listed and
+its files' times read (the logon's token has every administrator privilege enabled, the backup
+privilege among them), while reading `session.json` and setting `lease`'s time are denied. Windows'
+`ssh` refuses a private key file whose ACL has an `OWNER RIGHTS` entry, which a file inherits in a
+directory Python made owner-only (pytest's `tmp_path`); the per-user config dir has none. Still open:
 
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
-- `activityResult` for a script that exits non-zero (expected `FAILURE`; `posctl` reads the `FAILED`
-  lines as well, so it doesn't depend on it).
 - What `script/run` answers for an offline device (`posctl` refuses one before asking).
-- How long the first `support` login takes on a POS (`connect` allows 2 minutes).
+- Joining on a real POS: package version 4 isn't released yet. Its `Open -Mode Join` runs in the POS
+  package's integration tests, and `posctl`'s side against a stand-in POS (`tests/cli`).
 
 ## 12. Deployment order
 
