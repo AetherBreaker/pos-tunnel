@@ -540,7 +540,8 @@ configuration.
 - `update <DisplayName>`: runs `Install-PosTunnel` on the device via the NinjaOne API (section 7.1),
   waits up to 15 minutes for its result (a first install downloads and installs OpenSSH) and prints
   the POS's report. It exits non-zero unless the install completed: a failed step, or a deferred one
-  (a session is open, or a restart is pending).
+  (a session is open, or a restart is pending). When the report names fields the install wrote, it
+  then waits until NinjaOne shows them (section 8), so a `connect` straight after reads them.
 
 ### 7.8 `posctl rekey <DisplayName> | --all [--force] [--yes]`
 
@@ -548,6 +549,9 @@ Runs `Invoke-PosTunnel -Action Rekey` on the device and waits for its result: re
 relay key pair and the POS SSH server key pair (`ssh-keygen -A` after deleting the old ones), then
 republishes `posTunnelRelayKey` and `posTunnelHostKey`. For after a reimage or a suspected leak;
 rekeying a POS that is still compromised gains nothing, since the attacker reads the new private keys.
+A POS counts as rekeyed once NinjaOne shows the keys it republished (section 8), about a minute in
+all: until then a `connect` would give the relay the old relay public key, and the tunnel could
+never come up.
 
 - A POS in a session is refused: `posctl` refuses one with a relay lease, and `Rekey` itself one
   with a `session.json`. `--force` ends the session first, as `close` does and whoever opened it,
@@ -649,8 +653,19 @@ ready to paste into Coolify.
     (`data.message.params.output_message`). The series, not the script name alone, since a late
     `Open` and the `Close` that follows a timed-out `connect` are both `Invoke-PosTunnel`. A POS's
     output is untrusted (section 2): printed as the POS's report and read only for its `FAILED` and
-    `DEFERRED` line prefixes. An offline POS is refused before any script is requested (`close`
-    skips its script instead, and `rekey --all` skips the POS).
+    `DEFERRED` line prefixes and for the fields it says it wrote (below). An offline POS is refused
+    before any script is requested (`close` skips its script instead, and `rekey --all` skips the
+    POS).
+  - Written fields: the API shows a device field a script wrote well after the run's result (39 s on
+    the test POS, section 11), and `connect` reads a POS's keys and version there. So after `Rekey`
+    and `Install-PosTunnel`, `posctl` takes each `CHANGED<TAB>field <name><TAB><value>` line of the
+    output and polls the device's fields until they show those values, for up to 3 minutes, before
+    it reports success. The POS's word is only compared with what NinjaOne shows, never used as a
+    key. A `connect` from another workstation inside that minute still reads the old values
+    (section 9).
+  - Signing in again: a refresh ends the access tokens issued before it (section 11), so a second
+    `posctl` of the same identity, the operator's beside a coding agent's, cuts the first one off
+    mid-command. A call answered `401` therefore signs in again and is repeated, up to twice.
 - `ssh`: `posctl` runs OpenSSH's client non-interactively (`BatchMode`). On Windows that is the one in
   `System32\OpenSSH` (else `Program Files\OpenSSH`, else `PATH`), never Git Bash's, which can't reach
   the Windows `ssh-agent`. An operator key with a passphrase must be in `ssh-agent` (`ssh-add`, once:
@@ -717,6 +732,9 @@ Host pos-<slug>
 - `status` shows the relay's view only. A POS that missed a `keepalive` ends its side early while the
   relay lease stands; `keepalive` reports a POS that didn't confirm, which is where that shows.
 - A session's alias exists only on the workstations that ran `connect` for it.
+- NinjaOne shows a POS's new keys about a minute after a rekey or a first install. `rekey` and
+  `update` wait for that; a `connect` from another workstation in between reads the old keys and
+  fails after its tunnel wait, and works when run again.
 - `relay point` ends every open session.
 - Commands run in a session aren't recorded: the relay sees only encrypted traffic, and recording on
   the POS was judged not worth its cost.
@@ -813,7 +831,14 @@ including its login, the first ever as `support`; `keepalive` and `close` 12 s; 
 `rekey --force` 28 s; `update` 16 s with nothing to install; the alias answering from both Windows'
 and Git Bash's `ssh`; `Rekey` refusing a session left on the POS alone, and the next `connect` using
 the keys it republished; a `connect` straight after the lease was closed on the relay alone, the old
-tunnel still holding the port, waiting for the lease to go and for `Open`'s report (24 s). As `support` over the tunnel, the SYSTEM-only state folder can be listed and
+tunnel still holding the port, waiting for the lease to go and for `Open`'s report (24 s). With the
+finished branch's build the same day: `GET /v2/device/{id}/custom-fields` still returned the old
+keys 39 s after a `Rekey` run's `COMPLETED` activity, and a `connect` in that window gave the relay
+the old relay public key and timed out waiting for the tunnel; a second process's refresh of the
+same sign-in ended the first one's access token, whose next call got `401 not_authenticated`. With
+both answered (section 8): `rekey --force` 63 s, its wait for NinjaOne included, and a `connect`
+started the moment it returned (21 s); a `rekey` that two `status` commands overlapped finishing
+all the same. As `support` over the tunnel, the SYSTEM-only state folder can be listed and
 its files' times read (the logon's token has every administrator privilege enabled, the backup
 privilege among them), while reading `session.json` and setting `lease`'s time are denied. Windows'
 `ssh` refuses a private key file whose ACL has an `OWNER RIGHTS` entry, which a file inherits in a
@@ -822,6 +847,8 @@ directory Python made owner-only (pytest's `tmp_path`); the per-user config dir 
 - NinjaOne's WinGet patching updating a Win32-OpenSSH MSI it didn't install itself.
 - Which POSes already have Windows' built-in OpenSSH Server capability (`Setup` removes it).
 - What `script/run` answers for an offline device (`posctl` refuses one before asking).
+- How long NinjaOne can take to show a written field at worst: 39 s is one measurement, and
+  `posctl` waits 3 minutes.
 - Joining on a real POS: package version 4 isn't released yet. Its `Open -Mode Join` runs in the POS
   package's integration tests, and `posctl`'s side against a stand-in POS (`tests/cli`).
 
