@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 3,
   "files": {
     "Close.ps1": "8d183dddd2d67ef6a58218eb1b4a5f5256f147a97d02800030fdf693ceb51375",
     "Common.ps1": "d8ac1f33c73b3c5c4054311843a0c67a8284c61df5cd68fdadb8b98c7d1a83a1",
