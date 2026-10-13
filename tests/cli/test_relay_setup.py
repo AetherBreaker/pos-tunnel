@@ -80,7 +80,8 @@ class Setup:
   def __init__(self, tmp: Path) -> None:
     self.tag = uuid.uuid4().hex[:8]
     self.port = free_port()
-    self.admin_home, self.bob_home = tmp / "admin", tmp / "bob"
+    # A space in each, as a Windows profile path may have: every path posctl hands to ssh passes through one.
+    self.admin_home, self.bob_home = tmp / "admin home", tmp / "bob home"
     self.network, self.relay, self.logserver = f"setup-net-{self.tag}", f"setup-relay-{self.tag}", f"setup-logs-{self.tag}"
     self.volume = f"setup-data-{self.tag}"
     self.bundle = ""
@@ -147,9 +148,10 @@ class Setup:
     config = config_of(home)
     known_hosts = home / "known_hosts"
     known_hosts.write_text(f"[127.0.0.1]:{self.port} {config['relay']['public_key']}\n", encoding="utf-8")
+    # The known_hosts path quoted and forward-slashed: the option takes several files, split at spaces, and the home has one.
     return sh(
       openssh("ssh"), "-F", "none", "-p", str(self.port), "-i", config["operator_key"], "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-      "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}", "ctl@127.0.0.1", "tunnelctl", "status",
+      "-o", "StrictHostKeyChecking=yes", "-o", f'UserKnownHostsFile="{known_hosts.as_posix()}"', "ctl@127.0.0.1", "tunnelctl", "status",
       check=False, timeout=30,
     )  # fmt: skip
 
