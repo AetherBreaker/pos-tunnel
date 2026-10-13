@@ -109,8 +109,9 @@ pub fn parse_host_port(value: &str) -> Result<(String, u16)> {
     Ok((host.to_owned(), port))
 }
 
-/// Writes `bytes` to `path`, creating its directory. Unix gets mode 0600; on Windows the per-user
-/// config dir already keeps other users out.
+/// Writes `bytes` to `path`, creating its directory. Unix gets mode 0600; on Windows the file is as
+/// private as its dir: the per-user config dir keeps other users out, and a `POSCTL_CONFIG_HOME` is
+/// the operator's to choose.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
