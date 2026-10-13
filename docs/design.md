@@ -48,7 +48,7 @@ All key pairs are ed25519.
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
 | POS relay key pair (per device)                  | by `Setup`, once per device; again on `posctl rekey` or a from-scratch reinstall (section 7.1, `Install-PosTunnel` step 1) | POS: `C:\ProgramData\PosTunnel\relay_key`                                     | custom field `posTunnelRelayKey` → `posctl` → `tunnelctl open`                                                                                              | `tunnel@relay`, only while a session is open                                                                                                     |
 | POS SSH server key pair (per device)             | by `sshd` on its first start after `Setup` installs OpenSSH; again on `posctl rekey`                                       | POS: `C:\ProgramData\ssh\ssh_host_ed25519_key`                                | custom field `posTunnelHostKey` → `posctl` → local `known_hosts`                                                                                            | operator verifies it is talking to that POS's `sshd`                                                                                             |
-| Session key pair                                 | by `posctl`, on every `connect` and `rebuild`                                                                              | operator workstation, session state dir                                       | `Open` script parameter (public keys are safe in NinjaOne activity logs)                                                                                    | `support@POS` for this session only                                                                                                              |
+| Session key pair                                 | by `posctl`, on every `connect` (a joining workstation's too) and `rebuild`                                                | operator workstation, session state dir                                       | `Open` script parameter (public keys are safe in NinjaOne activity logs)                                                                                    | `support@POS` for this session only                                                                                                              |
 | Operator key pair (per operator)                 | by `posctl-admin operator add` (the admin's own: by hand, section 12)                                                      | that operator's workstation, installed with `posctl operator import`          | relay env var `OPERATOR_KEYS` → `/etc/ssh/operator_keys` (root-owned) at container start                                                                    | `ctl@relay` (forced `tunnelctl`) and `jump@relay` (forwarding only); names the operator in `tunnelctl`'s log. Identity, not a security boundary. |
 | Relay SSH server key pair                        | by `posctl-admin relay keygen`; again only to rotate it or move the relay                                                  | relay env var `RELAY_SSH_PRIVATE_KEY`; a copy in `posctl-admin`'s config dir  | `relay point` → fleet field → `Setup` → POS `known_hosts`; `posctl` config via `relay keygen` (admin), `operator import` or `relay set` (others)            | POS and operator verify the relay                                                                                                                |
 | Release signing key pair                         | by `posctl-admin signing keygen`; again only if lost or leaked                                                             | admin workstation only — never CI, so a compromised GitHub account can't sign | `signing keygen` or `signing publish` → fleet field → `Install-PosTunnel`; and `pos/allowed_signers`, for CI's check                                        | POS package releases (namespace `pos-tunnel-release`)                                                                                            |
@@ -396,8 +396,8 @@ itself, outside `versions\`, so it survives upgrades.
    exactly one, online. Read its device fields; a missing or malformed `posTunnelRelayKey` or
    `posTunnelHostKey` means the install hasn't run: say so and name `posctl update`.
 3. `tunnelctl status`. A lease for the port that is this workstation's own session (section 8,
-   session state): print the alias, the time left and whether the tunnel is up; done. Any other lease:
-   refuse, naming the operator who opened it.
+   session state): print the alias, the time left and whether the tunnel is up; done. Any other lease
+   is another workstation's session: join it (below) instead of steps 4 to 7.
 4. Generate a session key pair into the session state dir.
 5. `tunnelctl open <port> <id> <idle-seconds> <POS relay public key>`.
 6. NinjaOne API: run `Invoke-PosTunnel -Action Open -Port … -IdleSeconds … -SessionKey …` as SYSTEM.
@@ -413,6 +413,16 @@ A failure after step 5 undoes the session as `close` does (section 7.5) and prin
 reported, so `connect` leaves a working alias or nothing. If `tunnelctl` reports the relay starting
 (section 6.4), `connect` and `status` say so and that the POS retries within 2 minutes, and a timeout
 then says to run `connect` again.
+
+**Joining.** Operators share a session rather than wait for one another. The relay already lets any
+operator through to any tunnel, so only the POS has to accept a second key. `connect` on a POS with
+another workstation's lease generates its own session key pair, runs `tunnelctl renew <port>` (the
+idle timer restarts as for `keepalive`, and the relay's log names the joiner), then
+`Invoke-PosTunnel -Action Open -Mode Join -Port … -SessionKey …`, waits for its result, and goes on
+with steps 8 and 9. `--idle-timeout` applies only to the `connect` that opens the session, and the
+72h maximum counts from it. A POS whose `posTunnelVersion` is below 4 has no join mode: `connect`
+refuses and names `posctl update`, to run once the session has ended (`Install-PosTunnel` defers
+under one). A failed join removes only the joiner's own state: the session isn't its to close.
 
 **`Open -Port <port> -IdleSeconds <s> -SessionKey <base64>`** (POS, SYSTEM; the session key is the bare
 base64 of the ed25519 public key, so NinjaOne's parameter string needs no quoting): validate parameters
@@ -430,6 +440,13 @@ which Windows resolves to `::1` first, where `sshd` isn't listening; only `relay
 relay records every key a POS offers, section 6.5) → enable and start `PosTunnel-Link`. If any step
 fails, tear down: the operator is told `Open` failed, and a `session.json` left behind would have
 `Watch` keep `sshd` and `support` up until the idle timeout.
+
+**`Open -Mode Join -Port <port> -SessionKey <base64>`** (package version 4) changes nothing but the
+keys: it requires a session on that port (else it fails, and `connect` says the session has ended),
+adds the key as another line of `administrators_authorized_keys` unless it is already one, and
+touches `lease`. `sshd` reads that file at each login, so live connections go on. An explicit mode,
+not `Open` adding to whatever it finds: a session left over from a timed-out `connect` must still be
+replaced, and only `posctl`, which sees the relay's leases, can tell the two apart.
 
 **`Watch`** (POS, SYSTEM, every 2 min and at startup):
 1. No `session.json` → ensure the idle state and exit: `sshd` Manual and stopped (an OpenSSH MSI
@@ -483,7 +500,9 @@ nothing is read from the POS.
    deadline.
 3. Remove the alias, the `known_hosts` line and the session state.
 
-Any operator can close any session. A POS that doesn't confirm is reported after step 3, with a
+Any operator can close any session, and that ends it for every operator on it: a shared session has
+no leaving, only closing, so after `close` nobody is on that POS. `Close` reports how many session
+keys it removed, which `close` prints. A POS that doesn't confirm is reported after step 3, with a
 non-zero exit.
 
 ### 7.6 `posctl rebuild <DisplayName>` (break glass)
@@ -492,7 +511,8 @@ Resolve the device and refuse an offline one before anything is closed. Then `cl
 the POS didn't confirm its teardown. Wait until `tunnelctl status` no longer lists the lease (the
 daemon drops a closed lease at its next pass, and `open` refuses while it exists), then go on as
 `connect` from its step 4, with `tunnelctl open … --rebuild`. New session key, new relay lease, new
-72h maximum. Logged distinctly by `tunnelctl`.
+72h maximum. Logged distinctly by `tunnelctl`. Other operators on the session are cut off and
+`connect` again to join the new one.
 
 This defeats the 72h maximum, so an agent should not run it on its own. `rebuild` always prints a
 warning addressed to AI agents: it resets the 72h maximum, and an agent should not proceed unless the
@@ -676,7 +696,8 @@ Host pos-<slug>
 ## 9. Limitations
 
 - S4U logon: the `support` session has no network credentials (no access to network shares).
-- One session per device at a time.
+- One session per device at a time, shared by every operator who connects to it. `status` names who
+  opened it, not who joined: the relay records only the opener (its log shows a joiner's `renew`).
 - Up to ~2 minutes to recover a dropped tunnel (`Watch` interval).
 - The POSes restart nightly at 3 AM: an open session survives (`Watch` restores the tunnel at
   startup), but its tunnel is down for a few minutes.
@@ -692,7 +713,7 @@ Host pos-<slug>
 - `status` shows the relay's view only: the POS's state folder is SYSTEM-only, so its own idle
   deadline can't be read. A POS that missed a `keepalive` ends its side early while the relay lease
   stands.
-- A session's alias exists only on the workstation that opened it.
+- A session's alias exists only on the workstations that ran `connect` for it.
 - `relay point` ends every open session.
 - Commands run in a session aren't recorded: the relay sees only encrypted traffic, and recording on
   the POS was judged not worth its cost.
@@ -714,6 +735,13 @@ Host pos-<slug>
 - **A package hash held in NinjaOne instead of release signing:** a manual NinjaOne edit per release.
   A signing public key distributed through NinjaOne keeps the same root of trust with no per-release
   step.
+- **Session private keys held by the relay,** for a second operator to fetch: joining would need no
+  POS change, but a break-in on the relay, the one internet-facing part, would then log in to every
+  POS with an open session, where today it reaches tunnel ports and no further. A joiner's own key,
+  added by the POS, keeps POS credentials off the relay.
+- **`close` removing only the operator who ran it,** the session ending with the last one: more
+  logic on the POS, and a `close` the POS doesn't confirm would leave the session up. The user chose
+  `close` ending it for everyone (2026-10-13).
 - **Admin-only commands hidden in `posctl`:** the admin's own agent runs with the admin's key, so it
   would see them; a separate binary keeps them out of `posctl --help` for everyone.
 - **Package managers (WinGet via NinjaOne, PowerShell Gallery, Chocolatey) or NinjaOne "Install
