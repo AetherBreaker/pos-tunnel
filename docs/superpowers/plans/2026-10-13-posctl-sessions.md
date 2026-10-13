@@ -4378,7 +4378,15 @@ If Step 2 or Step 3 showed behaviour that `docs/design.md` describes differently
 - `Include posctl/config` went in front of a byte-order mark in `~/.ssh/config`, which broke every `ssh` on the workstation. The mark stays first.
 - The generated entries now say `ForwardAgent no`, and control characters are dropped from a POS's report.
 
-Left for later, in the order they matter: tolerate a failed poll before the first fleet-wide `rekey --all`; a joiner should wait for the tunnel; an overall timeout on relay calls.
+The review's smaller items were left for later at first; the user then asked for all of them (2026-10-13), and they are done on this branch, each with a test where one could be written:
+
+- A failed look at NinjaOne or the relay is one more "not yet", in `connect`'s wait and in every script run (`a8fbd19`, `4be4668`).
+- A joiner waits for the session's tunnel (`4be4668`). Relay calls end at a limit (`2a81341`).
+- Commands of one identity share the access token, and a script run is told from another operator's by who asked (`a8fbd19`).
+- `close`, `rebuild`, `rekey` and `keepalive` drop the state of sessions that ended elsewhere; `rekey --force` closes the leases open when it runs; a report cut short of its field lines is said to be (`a8fbd19`, `4be4668`).
+- Clearer refusals (`keepalive` without a session, a lost race to open, `--idle-timeout`), the agent refusal's `ssh-add`, and a file lock around the generated `ssh` files (`967c3cd`, `4be4668`).
+- POS package: `Set-FileContent` keeps the old file when the new one can't be written (`79f39ed`). This changes the package, so it is signed again; the manifest was set back to version 3 first, so that the signed, unreleased package is still version 4.
+- The Docker tests' homes have a space in their path (`db6735b`).
 
 - [x] **Step 5: Open the pull request (needs the user's go-ahead)** — https://github.com/AetherBreaker/pos-tunnel/pull/2, opened before the signature so the review could start; its manifest check is red until Task 5 Step 5
 
