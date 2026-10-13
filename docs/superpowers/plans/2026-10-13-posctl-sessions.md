@@ -4332,7 +4332,9 @@ gh run view "$run" --json jobs --jq '.jobs[] | "\(.name): \(.conclusion)"'
 
 Expected: all four jobs `success`. `POS package: integration tests as SYSTEM (windows-latest)` is the first run of Task 5's join cases; if one fails, read it with `gh run view "$run" --log-failed | tail -60`, fix the script or the test (the test is not the authority: decide which side is wrong from the spec), and push again. `posctl: relay setup and session integration tests (ubuntu-latest)` is the first run of the Docker test on Linux. `gh` sometimes loses the network mid-watch; query the run again.
 
-- [ ] **Step 3: Run the session commands against the test POS**
+**Status (2026-10-13):** pushed before Task 5 Step 5, so that the join cases ran before the user signs. Run 38439652660: the three test jobs `success`, the join cases included; `POS package: manifest matches the files, signature valid` fails until the package is signed, as it should.
+
+- [x] **Step 3: Run the session commands against the test POS**
 
 Against `POS 000 Test` only, with the branch's build (`cargo build` first; the Docker test leaves a `posctl-admin.exe` built with a test admin key, which `cargo build` replaces). `$P` is `D:/cargo-target/debug/posctl.exe`. The POS still has package version 3, so everything but joining is covered. Expected, in order:
 
@@ -4358,9 +4360,16 @@ $P status                                    # No open sessions.
 
 Anything else is a finding: stop and report it before going on. Leave no session open.
 
-- [ ] **Step 4: Correct the spec if a step found it wrong**
+**Result (2026-10-13):** every line as expected except the `connect` after `rekey --force`, which failed with `its tunnel didn't reach the relay within 3m`. Two faults, both fixed on this branch with tests before going on (they are defects in this plan's own design, and neither needs anything of the user's):
+
+- NinjaOne's API still returned the old keys 39 s after the `Rekey` run's result, so `connect` gave the relay the old relay public key. `rekey` and `update` now wait until NinjaOne shows the fields the POS's report says it wrote (`12e9fa6`). Checked on the test POS: `rekey --force` (63 s), then `connect` the moment it returned (21 s).
+- Found while measuring that: a second `posctl`'s sign-in refresh ends the first one's access token (`401 not_authenticated` on its next call). A call answered 401 now signs in again and is repeated (`371c56d`). Checked on the test POS: a `rekey` that two `status` commands overlapped finished.
+
+- [x] **Step 4: Correct the spec if a step found it wrong**
 
 If Step 2 or Step 3 showed behaviour that `docs/design.md` describes differently, change the section and commit it as `docs(design): ...` with what was observed. If nothing did, there is nothing to commit.
+
+**Result:** `c6414e1` records both faults and their answers in sections 7.7, 7.8, 8, 9 and 11.
 
 - [ ] **Step 5: Open the pull request (needs the user's go-ahead)**
 
