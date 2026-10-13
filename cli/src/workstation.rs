@@ -112,6 +112,22 @@ impl Workstation {
             .join("session_key")
     }
 
+    /// The lock two `posctl` commands at once (an operator's beside a coding agent's) take turns on
+    /// while one reads the session state and rewrites a file from it: each would otherwise write its
+    /// own view, and the later could lack the other's session. Released when dropped, and by the OS
+    /// if the command dies.
+    fn lock(&self) -> Result<fs::File> {
+        let path = self.sessions.with_file_name("lock");
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        let file =
+            fs::File::create(&path).with_context(|| format!("opening {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("locking {}", path.display()))?;
+        Ok(file)
+    }
+
     /// Stops when the operator key has a passphrase and `ssh-agent` doesn't hold it: `ssh` runs
     /// non-interactively, so it would be refused with no hint why (design section 8).
     pub fn check_operator_key(&self) -> Result<()> {
@@ -129,7 +145,7 @@ impl Workstation {
             "ssh-add"
         });
         // An agent that isn't running fails here and counts as not holding it.
-        let held = Command::new(ssh_add).arg("-L").output().is_ok_and(|out| {
+        let held = Command::new(&ssh_add).arg("-L").output().is_ok_and(|out| {
             String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .any(|line| keys::parse_public(line).is_ok_and(|listed| listed == public))
@@ -137,13 +153,18 @@ impl Workstation {
         if held {
             return Ok(());
         }
-        let start_agent = if cfg!(windows) {
-            "  Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile', '-Command', 'Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent'\n"
+        // The `ssh-add` just asked, by its path: in Git Bash a bare `ssh-add` is MSYS's, which can't
+        // reach the Windows agent. In PowerShell's call syntax there, as the line before it is.
+        let add = format!("\"{}\" \"{}\"", ssh_add.display(), key.display());
+        let how = if cfg!(windows) {
+            format!(
+                ", in PowerShell:\n  Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile', '-Command', 'Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent'\n  & {add}"
+            )
         } else {
-            ""
+            format!(":\n  {add}")
         };
         bail!(
-            "the operator key {0} has a passphrase and ssh-agent doesn't hold it. Add it once:\n{start_agent}  ssh-add \"{0}\"",
+            "the operator key {} has a passphrase and ssh-agent doesn't hold it. Add it once{how}",
             key.display()
         );
     }
@@ -236,6 +257,7 @@ impl Workstation {
     /// Rewrites the generated `config` and `known_hosts` whole from the config and the session state;
     /// nothing edits them in place (design section 8).
     pub fn write_ssh_files(&self) -> Result<()> {
+        let _lock = self.lock()?;
         // Forward-slashed and quoted: a profile path may hold a space, and `ssh_config` reads a
         // backslash before a quote as an escape.
         let quoted = |path: &Path| format!("\"{}\"", path.to_string_lossy().replace('\\', "/"));
@@ -280,6 +302,7 @@ impl Workstation {
     /// unless that line already precedes every `Host` and `Match` block (inside one it would apply to
     /// that block only). Returns whether it changed the file.
     pub fn ensure_include(&self) -> Result<bool> {
+        let _lock = self.lock()?;
         let path = self.ssh_dir.join("config");
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -543,9 +566,19 @@ mod tests {
             .unwrap();
         // A key generated here can't be in any agent.
         let error = ws.check_operator_key().unwrap_err().to_string();
+        // The `ssh-add` beside the client `posctl` runs, by its path: in Git Bash a bare `ssh-add`
+        // is MSYS's, which can't reach the Windows agent that was just asked.
+        let command = if cfg!(windows) {
+            format!(
+                "in PowerShell:\n  Start-Process powershell -Verb RunAs -Wait -ArgumentList '-NoProfile', '-Command', 'Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent'\n  & \"ssh-add.exe\" \"{}\"",
+                ws.operator_key.display()
+            )
+        } else {
+            format!(":\n  \"ssh-add\" \"{}\"", ws.operator_key.display())
+        };
         assert!(
             error.contains("has a passphrase and ssh-agent doesn't hold it")
-                && error.contains(&format!("ssh-add \"{}\"", ws.operator_key.display())),
+                && error.ends_with(&command),
             "{error}"
         );
     }
@@ -582,5 +615,20 @@ mod tests {
         }
         // Found behind the mark, so not added a second time.
         assert!(!ws.ensure_include().unwrap());
+    }
+
+    #[test]
+    fn the_generated_files_are_written_one_command_at_a_time() {
+        let ws = workstation("lock");
+        std::thread::scope(|scope| {
+            // Another `posctl` is rewriting them.
+            let held = ws.lock().unwrap();
+            let writer = scope.spawn(|| ws.write_ssh_files());
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!writer.is_finished());
+            drop(held);
+            writer.join().unwrap().unwrap();
+        });
+        assert!(ws.config_file().exists());
     }
 }
