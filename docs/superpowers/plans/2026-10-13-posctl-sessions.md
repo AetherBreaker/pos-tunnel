@@ -3117,7 +3117,7 @@ EOF
 - Consumes: everything Tasks 1 to 3 produce; `tests/cli/test_relay_setup.py`'s `Setup`, `config_of`, `sh`, `wait_for`.
 - Produces: the commands `posctl connect <name> [--idle-timeout <dur>]`, `keepalive <name>`, `status [<name>]`, `close <name>`, `rebuild <name> [--yes]`, `update <name>`, `rekey <name> | --all [--force] [--yes]`. Environment: `POSCTL_SSH_DIR` replaces `~/.ssh`. Output lines the test relies on: `<name> is connected: ssh <alias>`, `Joined the session <operator> opened on <name>: ssh <alias>`, `<name> is renewed. Idle timeout in ...`, `<name> reports: <the POS's close line>.`, `<name> is rebuilt: ssh <alias>`, `<name>: rekeyed`, `No open sessions.`
 
-- [ ] **Step 1: Write the end-to-end test**
+- [x] **Step 1: Write the end-to-end test**
 
 First two helpers in `tests/cli/test_relay_setup.py`, for both test files: on Windows, Windows' own `ssh` tools whatever shell runs pytest, and a temp dir that isn't pytest's owner-only one (design section 11: Windows' `ssh` refuses a key file under it).
 
@@ -3543,7 +3543,7 @@ def test_update_prints_the_installs_report(stack: Stack):
   stack.posctl(stack.admin, "close", "POS 1")
 ```
 
-- [ ] **Step 2: Run it to watch it fail**
+- [x] **Step 2: Run it to watch it fail**
 
 With Docker running:
 
@@ -3553,7 +3553,7 @@ POS_TUNNEL_DOCKER=1 uv run pytest tests/cli/test_sessions.py -x -q --no-cov 2>&1
 
 Expected: the first test fails with `posctl connect POS 1 --idle-timeout 2h exited 1:` and `Error: not implemented yet`.
 
-- [ ] **Step 3: Write `cli/src/bin/posctl.rs`**
+- [x] **Step 3: Write `cli/src/bin/posctl.rs`**
 
 ```rust
 //! `posctl`: on-demand SSH sessions to NinjaOne-managed POS machines. Design: `docs/design.md`.
@@ -3918,11 +3918,11 @@ fn main() -> Result<()> {
 }
 ```
 
-- [ ] **Step 4: Run the end-to-end test**
+- [x] **Step 4: Run the end-to-end test**
 
 The same command without `test_sessions.py`'s path restriction, so the relay-setup tests run with their new helpers too: `POS_TUNNEL_DOCKER=1 uv run pytest tests/cli -x -q --no-cov 2>&1 | tail -3`. Expected: `12 passed`, in about a minute and a half once the images are built. Then `uv run ruff check tests/cli` and `uv run pyright tests/cli`: no findings.
 
-- [ ] **Step 5: Name the CI job for what it now runs**
+- [x] **Step 5: Name the CI job for what it now runs**
 
 The job already runs `pytest tests/cli`, so it picks the new file up:
 
@@ -3940,7 +3940,7 @@ The job already runs `pytest tests/cli`, so it picks the new file up:
        - uses: actions/checkout@v4
 ```
 
-- [ ] **Step 6: Check and commit**
+- [x] **Step 6: Check and commit**
 
 Run `cargo fmt`, then the check. Expected: `test result: ok. 80 passed`, nothing from clippy or fmt.
 

@@ -1,8 +1,10 @@
 # Standard library imports
 import json
 import os
+import shutil
 import socket
 import subprocess
+import tempfile
 import time
 import tomllib
 import uuid
@@ -48,6 +50,26 @@ def free_port() -> int:
     return s.getsockname()[1]
 
 
+def openssh(tool: str) -> str:
+  """OpenSSH's `tool`: on Windows the one Windows ships, which posctl runs too (design 8).
+
+  Under Git Bash `PATH`'s is MSYS's, and Windows' `ssh` refuses a key file MSYS's `ssh-keygen` made.
+  """
+  shipped = Path(os.environ.get("SystemRoot", "")) / "System32" / "OpenSSH" / f"{tool}.exe"
+  return str(shipped) if os.name == "nt" and shipped.exists() else tool
+
+
+def workdir(name: str) -> Path:
+  """A temp dir for homes and key files, which the caller removes.
+
+  Not pytest's `tmp_path`: Python makes those owner-only (mode 0o700), on Windows an ACL whose OWNER RIGHTS
+  entry every file below inherits, and Windows' `ssh` refuses a private key that carries one.
+  """
+  path = Path(tempfile.gettempdir()) / f"posctl-{name}-{uuid.uuid4().hex[:8]}"
+  path.mkdir()
+  return path
+
+
 def config_of(home: Path) -> dict[str, Any]:
   return tomllib.loads((home / "posctl" / "config.toml").read_text(encoding="utf-8"))
 
@@ -63,7 +85,7 @@ class Setup:
     self.volume = f"setup-data-{self.tag}"
     self.bundle = ""
     admin_key = tmp / "admin_key"
-    sh("ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(admin_key))
+    sh(openssh("ssh-keygen"), "-q", "-t", "ed25519", "-N", "", "-C", "", "-f", str(admin_key))
     admin_pub = " ".join(admin_key.with_suffix(".pub").read_text(encoding="utf-8").split()[:2])
     # posctl-admin runs only with the admin key built into it, so build one with this test's.
     sh("cargo", "build", "--bins", cwd=ROOT, env={**os.environ, "POSCTL_ADMIN_KEY": admin_pub})
@@ -126,15 +148,16 @@ class Setup:
     known_hosts = home / "known_hosts"
     known_hosts.write_text(f"[127.0.0.1]:{self.port} {config['relay']['public_key']}\n", encoding="utf-8")
     return sh(
-      "ssh", "-F", "none", "-p", str(self.port), "-i", config["operator_key"], "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+      openssh("ssh"), "-F", "none", "-p", str(self.port), "-i", config["operator_key"], "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
       "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}", "ctl@127.0.0.1", "tunnelctl", "status",
       check=False, timeout=30,
     )  # fmt: skip
 
 
 @pytest.fixture(scope="module")
-def setup(tmp_path_factory: pytest.TempPathFactory):
-  s = Setup(tmp_path_factory.mktemp("setup"))
+def setup():
+  base = workdir("setup")
+  s = Setup(base)
   try:
     relay_line = s.run("posctl-admin", "relay", "keygen", f"127.0.0.1:{s.port}", home=s.admin_home).stdout.strip()
     s.bundle, operators_line = s.run("posctl-admin", "operator", "add", "bob", home=s.admin_home).stdout.splitlines()
@@ -144,6 +167,7 @@ def setup(tmp_path_factory: pytest.TempPathFactory):
   finally:
     if os.environ.get("POS_TUNNEL_KEEP") != "1":
       s.down()
+      shutil.rmtree(base, ignore_errors=True)
 
 
 def test_the_admin_reaches_tunnelctl_with_the_relay_key_pinned(setup: Setup):
