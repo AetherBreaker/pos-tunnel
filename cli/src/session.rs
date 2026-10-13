@@ -133,15 +133,23 @@ fn open(
     // A lease out of time was closed or has expired, and the daemon drops it at its next pass (design
     // section 6.5). That session has ended: wait for the port rather than join it, as `open` would
     // refuse and `renew` too.
-    let deadline = Instant::now() + ctx.timing.released;
+    let mut deadline = Instant::now() + ctx.timing.released;
     let leases = loop {
         let leases = relay::leases(ctx.relay)?;
-        let ended = |lease: &Lease| lease.idle_remaining.min(lease.absolute_remaining) == 0;
-        if !leases
-            .iter()
-            .any(|lease| lease.port == port && ended(lease))
-        {
-            break leases;
+        match leases.iter().find(|lease| lease.port == port) {
+            Some(lease) if lease.idle_remaining.min(lease.absolute_remaining) == 0 => {}
+            // The lease of a `connect` here that never finished: cut off, or its undo failed. Nobody
+            // holds its session key, so there is nothing to join; it is ended like any session, and
+            // the next look waits for it to go.
+            Some(lease)
+                if ctx.workstation.pending(device.id).as_deref() == Some(&lease.started) =>
+            {
+                eprintln!("Ending the session an unfinished `posctl connect` left on {name}...");
+                end(ctx, device)?;
+                deadline = Instant::now() + ctx.timing.released;
+                continue;
+            }
+            _ => break leases,
         }
         if Instant::now() >= deadline {
             bail!(
@@ -163,6 +171,15 @@ fn open(
         });
     }
 
+    // Before anything is opened: an operator's config that can't be read stops here, not after a
+    // session that took a minute to build.
+    if ctx.workstation.ensure_include()? {
+        eprintln!(
+            "Added `Include posctl/config` at the top of {}.",
+            ctx.workstation.ssh_dir.join("config").display()
+        );
+    }
+
     let taken: Vec<&str> = held.iter().map(|session| session.alias.as_str()).collect();
     let alias = workstation::alias(name, device.id, &taken);
     let key = keys::generate(&format!("posctl {alias}"))?;
@@ -172,8 +189,8 @@ fn open(
     let seconds = idle.as_secs();
     let invoke_script = ctx.ninja.invoke_script_id;
 
-    let joining = existing.is_some();
-    if let Some(lease) = &existing {
+    // The lease this command opens; none when it joins another workstation's.
+    let opened: Option<Lease> = if let Some(lease) = &existing {
         let version = fields.get("posTunnelVersion").and_then(|value| {
             value
                 .as_str()
@@ -181,37 +198,25 @@ fn open(
         });
         if version.unwrap_or(0) < JOIN_VERSION {
             bail!(
-                "{name} is in a session {} opened, and its POS package is too old to share one. Once that session has ended, run `posctl update \"{name}\"`",
+                "{name} is in a session {} opened, and its POS package is too old to share one. Once that session has ended, run `posctl update \"{name}\"`. If nobody is using it, `posctl close \"{name}\"` ends it",
                 lease.operator
             );
         }
+        None
     } else {
         let flag = if rebuild { " --rebuild" } else { "" };
-        let _: Lease = relay::ask(
+        Some(relay::ask(
             ctx.relay,
             &format!("open {port} {} {seconds} {pos_key}{flag}", device.id),
-        )?;
-    }
+        )?)
+    };
+    let joining = opened.is_none();
 
     // From here on a failure is undone below.
     let built = (|| -> Result<Lease> {
-        let lease = if joining {
-            // As `keepalive`: joining is use, and the relay's log then names the joiner.
-            let lease: Lease = relay::ask(ctx.relay, &format!("renew {port}"))?;
-            eprintln!("Joining the session {} opened on {name}...", lease.operator);
-            let joined = invoke(
-                ctx,
-                device.id,
-                &format!("-Action Open -Mode Join -Port {port} -SessionKey {session_key}"),
-            )?;
-            if !joined.success {
-                bail!(
-                    "{name} couldn't add this workstation to the session. It reported:\n{}",
-                    joined.output
-                );
-            }
-            lease
-        } else {
+        let lease = if let Some(opened) = &opened {
+            // Noted before anything can cut this command off (above).
+            ctx.workstation.set_pending(device.id, &opened.started)?;
             let mut run = ctx.api.start_script(
                 device.id,
                 invoke_script,
@@ -234,7 +239,12 @@ fn open(
                     reported = true;
                 }
                 let starting = match relay::leases(ctx.relay) {
-                    Ok(leases) => match leases.into_iter().find(|lease| lease.port == port) {
+                    // By `started` too: another lease on the port is an operator's who closed this
+                    // one and opened their own.
+                    Ok(leases) => match leases
+                        .into_iter()
+                        .find(|lease| lease.port == port && lease.started == opened.started)
+                    {
                         // Only once the POS has reported: a tunnel on the port before that is the
                         // previous session's, still connected, which `Open` is about to replace.
                         Some(lease) if reported && lease.listening => break lease,
@@ -260,6 +270,22 @@ fn open(
                 }
                 std::thread::sleep(ctx.timing.poll);
             }
+        } else {
+            // As `keepalive`: joining is use, and the relay's log then names the joiner.
+            let lease: Lease = relay::ask(ctx.relay, &format!("renew {port}"))?;
+            eprintln!("Joining the session {} opened on {name}...", lease.operator);
+            let joined = invoke(
+                ctx,
+                device.id,
+                &format!("-Action Open -Mode Join -Port {port} -SessionKey {session_key}"),
+            )?;
+            if !joined.success {
+                bail!(
+                    "{name} couldn't add this workstation to the session. It reported:\n{}\nIf the session has ended on the POS, `posctl close \"{name}\"` ends its relay lease, and `posctl connect` then opens a new one",
+                    joined.output
+                );
+            }
+            lease
         };
         ctx.workstation.save(
             &Session {
@@ -272,12 +298,6 @@ fn open(
             &key,
         )?;
         ctx.workstation.write_ssh_files()?;
-        if ctx.workstation.ensure_include()? {
-            eprintln!(
-                "Added `Include posctl/config` at the top of {}.",
-                ctx.workstation.ssh_dir.join("config").display()
-            );
-        }
         ctx.relay.login(&alias)?;
         Ok(lease)
     })();
@@ -289,16 +309,43 @@ fn open(
             how: if joining { How::Joined } else { How::Opened },
         }),
         Err(e) => {
-            // A joiner's failure ends nothing: the session isn't its to close. Its own failed open is
-            // closed again, the POS asked to tear down without waiting on a POS that may not answer.
-            if !joining {
-                let _ = ctx.relay.tunnelctl(&format!("close {port}"));
-                let _ = ctx
-                    .api
-                    .run_script(device.id, invoke_script, "-Action Close");
+            // A joiner's failure ends nothing: the session isn't its to close.
+            let Some(opened) = opened else {
+                let _ = ctx.workstation.remove(device.id);
+                let _ = ctx.workstation.write_ssh_files();
+                return Err(e);
+            };
+            // Unfinished again (`save` cleared the note), so its alias goes. The note itself stays
+            // until the lease is known to be closed: a kill takes the `ssh` child first, so a dying
+            // `connect` gets this far and no further, and the next one here must still know the lease.
+            let _ = ctx.workstation.set_pending(device.id, &opened.started);
+            let _ = ctx.workstation.write_ssh_files();
+            // Its own failed open is closed again, if the port's lease is still the one opened here.
+            // Another by now is an operator's who closed this one and opened their own: theirs to
+            // keep, on the relay and on the POS.
+            let closed = match relay::leases(ctx.relay) {
+                Ok(leases) => match leases.iter().find(|lease| lease.port == port) {
+                    Some(lease) if lease.started == opened.started => {
+                        ctx.relay.tunnelctl(&format!("close {port}")).map(drop)
+                    }
+                    Some(_) => {
+                        let _ = ctx.workstation.remove(device.id);
+                        return Err(e);
+                    }
+                    None => Ok(()),
+                },
+                Err(unknown) => Err(unknown),
+            };
+            // Without waiting on a POS that may not answer.
+            let _ = ctx
+                .api
+                .run_script(device.id, invoke_script, "-Action Close");
+            if closed.is_err() {
+                bail!(
+                    "{e:#}\nThe relay lease for {name} may still be open: `posctl connect \"{name}\"` again replaces it, and `posctl close \"{name}\"` ends it"
+                );
             }
             let _ = ctx.workstation.remove(device.id);
-            let _ = ctx.workstation.write_ssh_files();
             Err(e)
         }
     }
@@ -491,6 +538,27 @@ mod tests {
             "Include posctl/config\n\n"
         );
         assert_eq!(*relay.logins.borrow(), ["pos-000-test"]);
+    }
+
+    #[test]
+    fn an_ssh_config_that_cant_be_read_stops_connect_before_a_lease_is_opened() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        let ws = workstation("connect bad config");
+        std::fs::create_dir_all(&ws.ssh_dir).unwrap();
+        // UTF-16, as Windows PowerShell 5.1's `>` writes.
+        std::fs::write(ws.ssh_dir.join("config"), [0xff, 0xfe, b'H', 0]).unwrap();
+        let api = Api::with_token(&tenant.url, "t");
+
+        let error = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE).unwrap_err();
+
+        assert!(format!("{error:#}").contains("reading"), "{error:#}");
+        assert_eq!(relay.count("open"), 0);
+        assert!(
+            tenant
+                .requests_to("POST", "/v2/device/1/script/run")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -698,7 +766,8 @@ mod tests {
             .to_string();
 
         assert!(
-            error.contains("couldn't add this workstation to the session"),
+            error.contains("couldn't add this workstation to the session")
+                && error.contains("`posctl close \"POS 000 Test\"` ends its relay lease"),
             "{error}"
         );
         assert_eq!(relay.leases.borrow().len(), 1);
@@ -727,7 +796,8 @@ mod tests {
 
         assert!(
             error.contains("is in a session Jacob opened")
-                && error.contains("run `posctl update \"POS 000 Test\"`"),
+                && error.contains("run `posctl update \"POS 000 Test\"`")
+                && error.contains("`posctl close \"POS 000 Test\"` ends it"),
             "{error}"
         );
         assert_eq!(relay.calls(), ["status"]);
@@ -982,5 +1052,103 @@ mod tests {
 
         assert!(error.contains("so it wasn't reopened"), "{error}");
         assert_eq!(relay.count("open"), 0);
+    }
+
+    #[test]
+    fn the_next_connect_replaces_the_lease_an_unfinished_one_left() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        // The daemon stops answering once the lease is open, so the undo can't close it either.
+        relay.starting_after.set(Some(2));
+        let ws = workstation("connect unfinished");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+
+        let error = connect(&ctx, "POS 000 Test", MAX_IDLE)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("lease for POS 000 Test may still be open")
+                && error.contains("`posctl close \"POS 000 Test\"`"),
+            "{error}"
+        );
+        assert_eq!(relay.leases.borrow().len(), 1);
+        assert!(ws.held().unwrap().is_empty());
+
+        relay.starting_after.set(None);
+        let connected = connect(&ctx, "POS 000 Test", MAX_IDLE).unwrap();
+
+        // The leftover lease was ended and a new one opened: nothing held its session key to join with.
+        assert_eq!(connected.how, How::Opened);
+        assert_eq!(relay.count("renew"), 0);
+        let calls = relay.calls();
+        let closed = calls.iter().position(|call| call == "close 20001").unwrap();
+        assert!(
+            calls[closed..]
+                .iter()
+                .any(|call| call.starts_with("open 20001 ")),
+            "{calls:?}"
+        );
+        assert_ne!(connected.lease.started, "opened-1");
+        assert_eq!(ws.held().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_lease_another_operator_took_over_is_neither_adopted_nor_closed() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        // While this connect waits, Bob closes its lease and opens his own on the port.
+        relay.taken_over_after.set(Some(2));
+        let ws = workstation("connect taken over");
+        let api = Api::with_token(&tenant.url, "t");
+
+        let error = connect(&context(&api, &relay, &ws), "POS 000 Test", MAX_IDLE)
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("the relay dropped the lease while POS 000 Test was opening"),
+            "{error}"
+        );
+        // Bob's session stands: his lease isn't closed, and his POS isn't told to tear down.
+        assert_eq!(relay.count("close"), 0);
+        assert_eq!(relay.leases.borrow()[0].operator, "Bob");
+        assert_eq!(
+            tenant.requests_to("POST", "/v2/device/1/script/run").len(),
+            1
+        );
+        assert!(relay.logins.borrow().is_empty());
+        assert!(ws.held().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_undo_that_is_cut_off_still_leaves_the_lease_recognisable() {
+        let (tenant, _) = pos_tenant(Pos::default());
+        let relay = FakeRelay::new("Jacob");
+        // The login fails, and the undo is cut off at its first relay call (status, open and the
+        // wait's status came before): a kill takes the `ssh` child first, so the dying command still
+        // starts its undo.
+        *relay.login_error.borrow_mut() = Some("Connection closed".into());
+        relay.cut_off_after.set(Some(3));
+        let ws = workstation("connect cut off");
+        let api = Api::with_token(&tenant.url, "t");
+        let ctx = context(&api, &relay, &ws);
+
+        let cut_off = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            connect(&ctx, "POS 000 Test", MAX_IDLE)
+        }));
+        assert!(cut_off.is_err());
+        assert_eq!(relay.leases.borrow().len(), 1);
+        // No alias for the half-undone session, and the lease is still known as this workstation's.
+        assert!(ws.held().unwrap().is_empty());
+        assert_eq!(ws.pending(1).as_deref(), Some("opened-1"));
+
+        *relay.login_error.borrow_mut() = None;
+        relay.cut_off_after.set(None);
+        let connected = connect(&ctx, "POS 000 Test", MAX_IDLE).unwrap();
+
+        assert_eq!(connected.how, How::Opened);
+        assert_eq!(relay.count("renew"), 0);
+        assert_eq!(ws.pending(1), None);
     }
 }
