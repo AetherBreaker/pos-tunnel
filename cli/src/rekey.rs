@@ -5,7 +5,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 
 use crate::fleet;
-use crate::ninja::{Device, INVOKE_SCRIPT};
+use crate::ninja::{Device, INVOKE_SCRIPT, Published};
 use crate::relay;
 use crate::session::Context;
 
@@ -137,17 +137,20 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
             }
             // `connect` reads a POS's keys from NinjaOne, which shows new ones well after the run's
             // result (design section 8); a `connect` before then would hand out the old ones.
-            Ok(result)
-                if ctx
-                    .api
-                    .await_published(device.id, &result, deadline, ctx.timing.poll) =>
+            Ok(result) => match ctx
+                .api
+                .await_published(device.id, &result, deadline, ctx.timing.poll)
             {
-                Outcome::Rekeyed
-            }
-            Ok(_) => Outcome::Failed(format!(
-                "it has new keys, but NinjaOne didn't show them within {}: `posctl connect` fails until it does",
-                humantime::format_duration(ctx.timing.published)
-            )),
+                Published::Shown => Outcome::Rekeyed,
+                Published::TimedOut => Outcome::Failed(format!(
+                    "it has new keys, but NinjaOne didn't show them within {}: `posctl connect` fails until it does",
+                    humantime::format_duration(ctx.timing.published)
+                )),
+                Published::CutShort => Outcome::Failed(
+                    "it has new keys, but its report came without the lines for them, so whether NinjaOne shows them yet isn't known: give it a minute before `posctl connect`"
+                        .into(),
+                ),
+            },
             Err(e) => Outcome::Failed(format!("{e:#}")),
         };
         outcomes.push((label(device), outcome));

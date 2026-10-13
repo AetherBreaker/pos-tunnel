@@ -10,6 +10,7 @@
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -158,6 +159,26 @@ pub(crate) fn agent() -> Agent {
         .into()
 }
 
+/// NinjaOne's own "no" to a token request, as against a request that never reached it.
+#[derive(Debug)]
+struct Refused {
+    status: u16,
+    body: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Refused { status, body } = self;
+        write!(
+            f,
+            "NinjaOne refused the token request ({status}): {}",
+            snippet(body)
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
 fn token_request<T: DeserializeOwned>(base_url: &str, form: &[(&str, &str)]) -> Result<T> {
     let mut response = agent()
         .post(format!("{base_url}/ws/oauth/token"))
@@ -165,10 +186,7 @@ fn token_request<T: DeserializeOwned>(base_url: &str, form: &[(&str, &str)]) -> 
     let status = response.status().as_u16();
     let body = response.body_mut().read_to_string()?;
     if status != 200 {
-        bail!(
-            "NinjaOne refused the token request ({status}): {}",
-            snippet(&body)
-        );
+        return Err(Refused { status, body }.into());
     }
     Ok(serde_json::from_str(&body)?)
 }
@@ -184,11 +202,17 @@ fn sign_in(base_url: &str, client_id: &str, refresh: &str) -> Result<String> {
         ],
     )
     .map_err(|e| {
-        // Signing in again cures a refusal, not an unreachable NinjaOne.
-        if e.chain().any(|cause| cause.is::<ureq::Error>()) {
+        // Signing in again cures a sign-in NinjaOne no longer accepts: not an unreachable NinjaOne,
+        // and not a refusal for another reason (too many requests, an outage).
+        let stale = e
+            .downcast_ref::<Refused>()
+            .is_some_and(|refused| matches!(refused.status, 400 | 401));
+        if stale {
+            e.context("refreshing the NinjaOne sign-in failed; run `posctl login`")
+        } else if e.chain().any(|cause| cause.is::<ureq::Error>()) {
             e.context(format!("couldn't reach NinjaOne at {base_url}"))
         } else {
-            e.context("refreshing the NinjaOne sign-in failed; run `posctl login`")
+            e.context("refreshing the NinjaOne sign-in failed")
         }
     })?;
     tokens["access_token"]
@@ -201,14 +225,30 @@ fn snippet(body: &str) -> String {
     body.chars().take(300).collect()
 }
 
-/// The refresh token: Windows Credential Manager on Windows (design section 3), a user-only file elsewhere
-/// and wherever `POSCTL_CONFIG_HOME` is set, so a second identity has its own sign-in and a test never
-/// reads the real one (design section 8).
+/// What the commands of one identity share, between runs and with each other while they overlap (design
+/// section 8): the access token, since NinjaOne ends the one before at every sign-in, and the NinjaOne
+/// user they run as, which the API never states and a command learns from its own script run.
+pub trait Shared {
+    fn access_token(&self) -> Option<String>;
+    fn set_access_token(&self, token: &str);
+    fn user(&self) -> Option<i64>;
+    fn set_user(&self, user: i64);
+}
+
+/// The sign-in as stored: Windows Credential Manager on Windows (design section 3), files elsewhere and
+/// wherever `POSCTL_CONFIG_HOME` is set (mode 0600 on Unix), so a second identity has its own sign-in and a
+/// test never reads the real one (design section 8).
 pub mod token_store {
     use anyhow::{Context, Result};
 
+    /// A stored value: its Credential Manager entry and its file beside the config.
+    type Slot = (&'static str, &'static str);
+    const REFRESH: Slot = ("ninjaone-refresh-token", "refresh_token");
+    const ACCESS: Slot = ("ninjaone-access-token", "access_token");
+    const USER: Slot = ("ninjaone-user", "ninja_user");
+
     #[cfg(windows)]
-    fn entry() -> Result<keyring_core::Entry> {
+    fn entry(key: &str) -> Result<keyring_core::Entry> {
         static STORE: std::sync::Once = std::sync::Once::new();
         let mut failed = None;
         STORE.call_once(|| match windows_native_keyring_store::Store::new() {
@@ -218,37 +258,73 @@ pub mod token_store {
         if let Some(e) = failed {
             return Err(e.into());
         }
-        Ok(keyring_core::Entry::new(
-            "posctl",
-            "ninjaone-refresh-token",
-        )?)
+        Ok(keyring_core::Entry::new("posctl", key)?)
     }
 
-    fn path() -> Result<std::path::PathBuf> {
-        Ok(crate::config::config_home()?
-            .join("posctl")
-            .join("refresh_token"))
+    fn path(file: &str) -> Result<std::path::PathBuf> {
+        Ok(crate::config::config_home()?.join("posctl").join(file))
     }
 
-    pub fn save(token: &str) -> Result<()> {
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn write((key, file): Slot, value: &str) -> Result<()> {
         #[cfg(windows)]
         if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
-            return Ok(entry()?.set_password(token)?);
+            return Ok(entry(key)?.set_password(value)?);
         }
-        crate::config::write_private(&path()?, token.as_bytes())
+        crate::config::write_private(&path(file)?, value.as_bytes())
+    }
+
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn read((key, file): Slot) -> Result<String> {
+        #[cfg(windows)]
+        if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
+            return Ok(entry(key)?.get_password()?);
+        }
+        Ok(std::fs::read_to_string(path(file)?)?.trim().to_owned())
+    }
+
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn clear((key, file): Slot) -> Result<()> {
+        #[cfg(windows)]
+        if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
+            return Ok(entry(key)?.delete_credential()?);
+        }
+        Ok(std::fs::remove_file(path(file)?)?)
+    }
+
+    /// Stores a new sign-in's refresh token, and forgets what was shared under the one before it,
+    /// which may have been another user's.
+    pub fn save(token: &str) -> Result<()> {
+        write(REFRESH, token)?;
+        let _ = clear(ACCESS);
+        let _ = clear(USER);
+        Ok(())
     }
 
     pub fn load() -> Result<String> {
-        #[cfg(windows)]
-        if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
-            return entry()?
-                .get_password()
-                .context("not signed in to NinjaOne: run `posctl login`");
+        read(REFRESH).context("not signed in to NinjaOne: run `posctl login`")
+    }
+
+    /// `Shared`, kept where the refresh token is. A value that can't be read or written is one not
+    /// shared: the command then signs in for itself.
+    pub struct Stored;
+
+    impl super::Shared for Stored {
+        fn access_token(&self) -> Option<String> {
+            read(ACCESS).ok()
         }
-        Ok(std::fs::read_to_string(path()?)
-            .context("not signed in to NinjaOne: run `posctl login`")?
-            .trim()
-            .to_owned())
+
+        fn set_access_token(&self, token: &str) {
+            let _ = write(ACCESS, token);
+        }
+
+        fn user(&self) -> Option<i64> {
+            read(USER).ok()?.parse().ok()
+        }
+
+        fn set_user(&self, user: i64) {
+            let _ = write(USER, &user.to_string());
+        }
     }
 }
 
@@ -259,6 +335,8 @@ pub struct Api {
     access_token: RefCell<String>,
     /// The client ID and refresh token `call` signs in again with; none for a test's fixed token.
     refresh: Option<(String, String)>,
+    /// None in tests that share nothing.
+    shared: Option<Rc<dyn Shared>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +386,21 @@ pub struct ScriptRun {
     series: Option<String>,
 }
 
+/// The device fields a POS publishes (design section 7.1): `Publish-DeviceFields` reports a line for
+/// each, at the end of an install's report and of a rekey's.
+const DEVICE_FIELDS: [&str; 3] = ["posTunnelRelayKey", "posTunnelHostKey", "posTunnelVersion"];
+
+/// What became of the fields a script reported writing (`Api::await_published`).
+#[derive(Debug, PartialEq)]
+pub enum Published {
+    /// NinjaOne shows every value written, or nothing was.
+    Shown,
+    TimedOut,
+    /// The report lacks the line of one of the fields: NinjaOne cut it short, and what was written
+    /// isn't known.
+    CutShort,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScriptResult {
     /// NinjaOne's verdict, and no `FAILED` line in the output.
@@ -340,16 +433,35 @@ impl ScriptResult {
 
 impl Api {
     pub fn connect(base_url: &str, client_id: &str) -> Result<Api> {
-        Api::with_refresh_token(base_url, client_id, &token_store::load()?)
+        let shared: Rc<dyn Shared> = Rc::new(token_store::Stored);
+        Api::with_refresh_token(base_url, client_id, &token_store::load()?, Some(shared))
     }
 
-    /// `connect` without the token store, so a test never touches a real sign-in.
-    pub fn with_refresh_token(base_url: &str, client_id: &str, refresh: &str) -> Result<Api> {
+    /// `connect` without the token store, so a test never touches a real sign-in. Signs in only if
+    /// `shared` holds no access token: one already there is another command's, and still good or
+    /// found out at the first call.
+    pub fn with_refresh_token(
+        base_url: &str,
+        client_id: &str,
+        refresh: &str,
+        shared: Option<Rc<dyn Shared>>,
+    ) -> Result<Api> {
+        let access_token = match shared.as_ref().and_then(|shared| shared.access_token()) {
+            Some(token) => token,
+            None => {
+                let token = sign_in(base_url, client_id, refresh)?;
+                if let Some(shared) = &shared {
+                    shared.set_access_token(&token);
+                }
+                token
+            }
+        };
         Ok(Api {
             agent: agent(),
             base_url: base_url.to_owned(),
-            access_token: RefCell::new(sign_in(base_url, client_id, refresh)?),
+            access_token: RefCell::new(access_token),
             refresh: Some((client_id.to_owned(), refresh.to_owned())),
+            shared,
         })
     }
 
@@ -360,13 +472,14 @@ impl Api {
             base_url: base_url.to_owned(),
             access_token: RefCell::new(access_token.to_owned()),
             refresh: None,
+            shared: None,
         }
     }
 
-    /// One call; the status and body, whatever the status. NinjaOne ends an access token when the
-    /// sign-in is refreshed again, which a second `posctl` running at the same time does (design
-    /// section 8): a 401 signs in again and repeats the call, twice at most, as the other run may
-    /// refresh once more in between.
+    /// One call; the status and body, whatever the status. NinjaOne ends an access token at the next
+    /// sign-in (design section 8), so the token is shared, and a 401 means it ran out or another
+    /// command signed in: this one takes that command's token, or signs in and shares its own, and
+    /// repeats the call. Twice at most, as a third command may sign in in between.
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String)> {
         let url = format!("{}{path}", self.base_url);
         let mut sign_ins_left = 2;
@@ -391,7 +504,23 @@ impl Api {
             match &self.refresh {
                 Some((client_id, refresh)) if status == 401 && sign_ins_left > 0 => {
                     sign_ins_left -= 1;
-                    *self.access_token.borrow_mut() = sign_in(&self.base_url, client_id, refresh)?;
+                    let refused = self.access_token.borrow().clone();
+                    let theirs = self
+                        .shared
+                        .as_ref()
+                        .and_then(|shared| shared.access_token())
+                        .filter(|token| *token != refused);
+                    let token = match theirs {
+                        Some(token) => token,
+                        None => {
+                            let token = sign_in(&self.base_url, client_id, refresh)?;
+                            if let Some(shared) = &self.shared {
+                                shared.set_access_token(&token);
+                            }
+                            token
+                        }
+                    };
+                    *self.access_token.borrow_mut() = token;
                 }
                 _ => return Ok((status, text)),
             }
@@ -488,17 +617,29 @@ impl Api {
         self.get(&format!("/v2/device/{device}/custom-fields"))
     }
 
-    /// Waits until NinjaOne shows every field value `result` says its script wrote; `false` if
-    /// `deadline` passes first. The API shows a POS's field writes well after its run's result (39 s
-    /// on the test POS, design section 11), and `connect` reads a POS's keys and version there. A
-    /// deadline rather than a timeout, so that the waits for many POSes share one.
+    /// Waits until NinjaOne shows every field value `result` says its script wrote, up to `deadline`.
+    /// The API shows a POS's field writes well after its run's result (39 s on the test POS, design
+    /// section 11), and `connect` reads a POS's keys and version there. A deadline rather than a
+    /// timeout, so that the waits for many POSes share one. `result` is an install's or a rekey's:
+    /// one that doesn't name every device field was cut short by NinjaOne, and isn't waited on.
     pub fn await_published(
         &self,
         device: i64,
         result: &ScriptResult,
         deadline: Instant,
         poll: Duration,
-    ) -> bool {
+    ) -> Published {
+        let names = |field: &str| {
+            result.output.lines().any(|line| {
+                line.strip_prefix("OK\tfield ") == Some(field)
+                    || line
+                        .strip_prefix("CHANGED\tfield ")
+                        .is_some_and(|rest| rest.split('\t').next() == Some(field))
+            })
+        };
+        if !DEVICE_FIELDS.into_iter().all(names) {
+            return Published::CutShort;
+        }
         let written = result.published();
         loop {
             // A failed read is one more "not yet"; the deadline bounds it.
@@ -512,8 +653,11 @@ impl Api {
                         })
                     })
                 });
-            if shown || Instant::now() >= deadline {
-                return shown;
+            if shown {
+                return Published::Shown;
+            }
+            if Instant::now() >= deadline {
+                return Published::TimedOut;
             }
             std::thread::sleep(poll);
         }
@@ -529,7 +673,12 @@ impl Api {
         parameters: &str,
     ) -> Result<ScriptRun> {
         let before: Value = self.get(&format!("/v2/device/{device}/activities?pageSize=10"))?;
-        let after = before["lastNodeActivityId"].as_i64().unwrap_or(0);
+        // Without it, the newest activity listed: starting from 0 would take an earlier run, already
+        // complete, for this one.
+        let after = before["lastNodeActivityId"]
+            .as_i64()
+            .or(before["activities"][0]["id"].as_i64())
+            .unwrap_or(0);
         self.run_script(device, script, parameters)?;
         Ok(ScriptRun {
             device,
@@ -547,15 +696,30 @@ impl Api {
                 "/v2/device/{device}/activities?newerThan={}&pageSize=200",
                 run.after
             ))?;
-            // Newest first, so the last match is the oldest request since `after`: this run's. By
-            // series from here on, not by name: a late `Open` and the `Close` that follows a timed-out
-            // `connect` are both `Invoke-PosTunnel`.
-            run.series = reply["activities"]
+            // Oldest first; the reply lists newest first.
+            let requests: Vec<&Value> = reply["activities"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .rfind(|a| a["statusCode"] == "START_REQUESTED" && a["sourceName"] == run.name)
-                .and_then(|a| a["seriesUid"].as_str().map(str::to_owned));
+                .rev()
+                .filter(|a| a["statusCode"] == "START_REQUESTED" && a["sourceName"] == run.name)
+                .collect();
+            // This run is the oldest request since `after`: by this user, where one is. Another
+            // operator's request for the same script, landing between this run's two calls, would
+            // otherwise be followed in its place. The API never says who is signed in, so the user is
+            // learned from a request that stands alone, which also puts a wrong one right.
+            let user = self.shared.as_ref().and_then(|shared| shared.user());
+            let asked_by = |request: &&&Value| user.is_some() && request["userId"].as_i64() == user;
+            let mine = requests.iter().find(asked_by).or(requests.first());
+            if let (Some(shared), [only]) = (&self.shared, requests.as_slice())
+                && let Some(id) = only["userId"].as_i64()
+                && user != Some(id)
+            {
+                shared.set_user(id);
+            }
+            // By series from here on, not by name: a late `Open` and the `Close` that follows a
+            // timed-out `connect` are both `Invoke-PosTunnel`.
+            run.series = mine.and_then(|a| a["seriesUid"].as_str().map(str::to_owned));
         }
         let Some(series) = &run.series else {
             return Ok(None);
@@ -601,42 +765,52 @@ impl Api {
         timeout: Duration,
         poll: Duration,
     ) -> Vec<Result<ScriptResult>> {
-        let mut pending: Vec<(usize, ScriptRun)> = Vec::new();
-        let mut results: Vec<Option<Result<ScriptResult>>> = Vec::new();
+        let waited = humantime::format_duration(timeout);
+        // Each run with what its last look failed with, if it did.
+        let mut pending: Vec<(usize, ScriptRun, Option<anyhow::Error>)> = Vec::new();
+        let mut results: Vec<Result<ScriptResult>> = Vec::new();
         for (index, &device) in devices.iter().enumerate() {
             match self.start_script(device, script, name, parameters) {
                 Ok(run) => {
-                    pending.push((index, run));
-                    results.push(None);
+                    pending.push((index, run, None));
+                    results.push(Err(anyhow::anyhow!(
+                        "the POS reported no result for {name} within {waited}"
+                    )));
                 }
-                Err(e) => results.push(Some(Err(e))),
+                Err(e) => results.push(Err(e)),
             }
         }
         let deadline = Instant::now() + timeout;
         loop {
-            pending.retain_mut(|(index, run)| match self.poll_script(run).transpose() {
-                Some(result) => {
-                    results[*index] = Some(result);
+            // A look that fails is one more "not yet": one NinjaOne error among the hundreds of calls
+            // a fleet takes mustn't fail a POS that goes on to report.
+            pending.retain_mut(|(index, run, trouble)| match self.poll_script(run) {
+                Ok(Some(result)) => {
+                    results[*index] = Ok(result);
                     false
                 }
-                None => true,
+                Ok(None) => {
+                    *trouble = None;
+                    true
+                }
+                Err(e) => {
+                    *trouble = Some(e);
+                    true
+                }
             });
             if pending.is_empty() || Instant::now() >= deadline {
                 break;
             }
             std::thread::sleep(poll);
         }
+        for (index, _, trouble) in pending {
+            if let Some(e) = trouble {
+                results[index] = Err(e.context(format!(
+                    "the POS's result for {name} couldn't be read within {waited}"
+                )));
+            }
+        }
         results
-            .into_iter()
-            .map(|result| {
-                result.unwrap_or_else(|| {
-                    bail!(
-                        "the POS reported no result for {name} within {}",
-                        humantime::format_duration(timeout)
-                    )
-                })
-            })
-            .collect()
     }
 }
 
@@ -780,14 +954,15 @@ mod tests {
             .local_addr()
             .unwrap()
             .port();
-        let unreachable = Api::with_refresh_token(&format!("http://127.0.0.1:{port}"), "c", "r");
+        let unreachable =
+            Api::with_refresh_token(&format!("http://127.0.0.1:{port}"), "c", "r", None);
         let error = format!("{:#}", unreachable.err().unwrap());
         assert!(
             error.contains("couldn't reach NinjaOne") && !error.contains("posctl login"),
             "{error}"
         );
         let fake = crate::fake::Fake::start(|_, _, _| (400, json!({"error": "invalid_grant"})));
-        let refused = Api::with_refresh_token(&fake.url, "c", "r");
+        let refused = Api::with_refresh_token(&fake.url, "c", "r", None);
         let error = format!("{:#}", refused.err().unwrap());
         assert!(
             error.contains("run `posctl login`") && error.contains("invalid_grant"),
@@ -991,25 +1166,50 @@ mod tests {
             output: output.to_owned(),
         };
         let poll = Duration::from_millis(5);
+        let soon = || Instant::now() + Duration::from_secs(5);
 
         let wrote = result(
-            "CHANGED\trelay key pair\tregenerated\nCHANGED\tfield posTunnelRelayKey\tnew\nCHANGED\tfield posTunnelVersion\t4",
+            "CHANGED\trelay key pair\tregenerated\nCHANGED\tfield posTunnelRelayKey\tnew\nOK\tfield posTunnelHostKey\nCHANGED\tfield posTunnelVersion\t4",
         );
         assert_eq!(
             wrote.published(),
             [("posTunnelRelayKey", "new"), ("posTunnelVersion", "4")]
         );
-        assert!(api.await_published(1, &wrote, Instant::now() + Duration::from_secs(5), poll));
+        assert_eq!(
+            api.await_published(1, &wrote, soon(), poll),
+            Published::Shown
+        );
         assert_eq!(asked(), 3);
 
         // Nothing written: nothing to wait for, and nothing asked.
-        let unchanged = result("OK\tfield posTunnelRelayKey\nOK\tfield posTunnelVersion");
-        assert!(api.await_published(1, &unchanged, Instant::now(), poll));
+        let unchanged = result(
+            "OK\tfield posTunnelRelayKey\nOK\tfield posTunnelHostKey\nOK\tfield posTunnelVersion",
+        );
+        assert_eq!(
+            api.await_published(1, &unchanged, Instant::now(), poll),
+            Published::Shown
+        );
         assert_eq!(asked(), 3);
 
         // A value NinjaOne never shows runs the wait out.
-        let unseen = result("CHANGED\tfield posTunnelRelayKey\tnewer");
-        assert!(!api.await_published(1, &unseen, Instant::now() + Duration::from_millis(50), poll));
+        let unseen = result(
+            "CHANGED\tfield posTunnelRelayKey\tnewer\nOK\tfield posTunnelHostKey\nOK\tfield posTunnelVersion",
+        );
+        let shortly = Instant::now() + Duration::from_millis(50);
+        assert_eq!(
+            api.await_published(1, &unseen, shortly, poll),
+            Published::TimedOut
+        );
+
+        // A report that stops before its field lines says nothing about them: not waited on, not asked.
+        let asked_before = asked();
+        let cut =
+            result("CHANGED\trelay key pair\tregenerated\nCHANGED\tfield posTunnelRelayKey\tnew");
+        assert_eq!(
+            api.await_published(1, &cut, soon(), poll),
+            Published::CutShort
+        );
+        assert_eq!(asked(), asked_before);
     }
 
     #[test]
@@ -1027,7 +1227,7 @@ mod tests {
             }
             (200, json!({"posTunnelVersion": "4"}))
         });
-        let api = Api::with_refresh_token(&fake.url, "c", "r").unwrap();
+        let api = Api::with_refresh_token(&fake.url, "c", "r", None).unwrap();
 
         let fields = api.custom_fields(1).unwrap();
 
@@ -1047,7 +1247,7 @@ mod tests {
                 (401, json!({"error": "not_authenticated"}))
             }
         });
-        let api = Api::with_refresh_token(&fake.url, "c", "r").unwrap();
+        let api = Api::with_refresh_token(&fake.url, "c", "r", None).unwrap();
 
         let error = api.custom_fields(1).unwrap_err().to_string();
 
@@ -1075,5 +1275,235 @@ mod tests {
         let got = api.poll_script(&mut run).unwrap().unwrap();
 
         assert_eq!(got.output, "OK\tfolder[2J\nOK\tcurrent\tversion 4");
+    }
+
+    /// A tenant whose looks at device 1's run fail `failures` times before listing it complete.
+    fn flaky_tenant(failures: usize) -> crate::fake::Fake {
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        crate::fake::Fake::start(move |method, path, _| {
+            if method == "POST" {
+                return (204, Value::Null);
+            }
+            if !path.contains("newerThan") && !path.contains("seriesUid") {
+                return (200, json!({"activities": [], "lastNodeActivityId": 10}));
+            }
+            if looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < failures {
+                return (502, json!({"error": "bad gateway"}));
+            }
+            let run = [
+                completed(12, 1, "s", "SUCCESS", "OK\tdone"),
+                activity(11, 1, "START_REQUESTED", "s", json!({})),
+            ];
+            (200, json!({"activities": run, "lastNodeActivityId": 12}))
+        })
+    }
+
+    #[test]
+    fn a_look_that_fails_is_not_the_runs_result() {
+        let fake = flaky_tenant(2);
+        let api = Api::with_token(&fake.url, "t");
+
+        let results = api.run_scripts(
+            &[1],
+            94,
+            INVOKE_SCRIPT,
+            "-Action Touch",
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+        );
+
+        assert_eq!(results[0].as_ref().unwrap().output, "OK\tdone");
+    }
+
+    #[test]
+    fn looks_that_keep_failing_are_what_the_timeout_reports() {
+        let fake = flaky_tenant(usize::MAX);
+        let api = Api::with_token(&fake.url, "t");
+
+        let results = api.run_scripts(
+            &[1],
+            94,
+            INVOKE_SCRIPT,
+            "-Action Touch",
+            Duration::from_millis(100),
+            Duration::from_millis(5),
+        );
+
+        let error = format!("{:#}", results[0].as_ref().unwrap_err());
+        assert!(
+            error.contains("couldn't be read within 100ms") && error.contains("(502)"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn without_a_newest_activity_id_the_newest_listed_one_stands_in() {
+        // The run before this one, already complete: taken for this run if looks started from 0.
+        let fake = crate::fake::Fake::start(|method, path, _| {
+            if method == "POST" {
+                return (204, Value::Null);
+            }
+            if path.contains("newerThan") {
+                return (200, json!({"activities": []}));
+            }
+            let earlier = [
+                completed(31, 1, "old", "SUCCESS", "OK\told"),
+                activity(30, 1, "START_REQUESTED", "old", json!({})),
+            ];
+            (200, json!({"activities": earlier}))
+        });
+        let api = Api::with_token(&fake.url, "t");
+
+        let mut run = api.start_script(1, 94, INVOKE_SCRIPT, "").unwrap();
+
+        assert_eq!(api.poll_script(&mut run).unwrap(), None);
+        assert_eq!(
+            fake.requests_to("GET", "/v2/device/1/activities?newerThan=31&pageSize=200")
+                .len(),
+            1
+        );
+    }
+
+    /// A tenant that issues `t1`, `t2`, ... at the token endpoint and answers the first call `401`.
+    fn refusing_once() -> crate::fake::Fake {
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let (issued, calls) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        crate::fake::Fake::start(move |_, path, _| {
+            if path == "/ws/oauth/token" {
+                let token = format!("t{}", issued.fetch_add(1, SeqCst) + 1);
+                return (200, json!({"access_token": token}));
+            }
+            if calls.fetch_add(1, SeqCst) == 0 {
+                return (401, json!({"error": "not_authenticated"}));
+            }
+            (200, json!({}))
+        })
+    }
+
+    #[test]
+    fn commands_share_one_access_token() {
+        let fake = crate::fake::Fake::start(|_, path, _| {
+            if path == "/ws/oauth/token" {
+                (200, json!({"access_token": "t1"}))
+            } else {
+                (200, json!({}))
+            }
+        });
+        let shared = Rc::new(crate::fake::Memory::default());
+
+        // Two commands of one identity, the second starting while the first still runs.
+        let first = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+        let second = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+        first.custom_fields(1).unwrap();
+        second.custom_fields(1).unwrap();
+        first.custom_fields(1).unwrap();
+
+        assert_eq!(fake.requests_to("POST", "/ws/oauth/token").len(), 1);
+        assert_eq!(
+            fake.authorizations_to("GET", "/v2/device/1/custom-fields"),
+            ["Bearer t1", "Bearer t1", "Bearer t1"]
+        );
+    }
+
+    #[test]
+    fn a_refused_call_takes_the_token_another_command_signed_in_with() {
+        let fake = refusing_once();
+        let shared = Rc::new(crate::fake::Memory::default());
+        shared.set_access_token("old");
+        let api = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+        // Another command found `old` run out and signed in.
+        shared.set_access_token("theirs");
+
+        api.custom_fields(1).unwrap();
+
+        assert_eq!(
+            fake.authorizations_to("GET", "/v2/device/1/custom-fields"),
+            ["Bearer old", "Bearer theirs"]
+        );
+        assert!(fake.requests_to("POST", "/ws/oauth/token").is_empty());
+    }
+
+    #[test]
+    fn a_refused_call_with_nobody_elses_token_signs_in_and_shares_its_own() {
+        let fake = refusing_once();
+        let shared = Rc::new(crate::fake::Memory::default());
+        shared.set_access_token("old");
+        let api = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+
+        api.custom_fields(1).unwrap();
+
+        assert_eq!(
+            fake.authorizations_to("GET", "/v2/device/1/custom-fields"),
+            ["Bearer old", "Bearer t1"]
+        );
+        assert_eq!(shared.access_token().as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn only_a_sign_in_ninjaone_no_longer_accepts_is_told_to_log_in_again() {
+        let fake = crate::fake::Fake::start(|_, _, _| (429, json!({"error": "too_many_requests"})));
+
+        let refused = Api::with_refresh_token(&fake.url, "c", "r", None);
+
+        let error = format!("{:#}", refused.err().unwrap());
+        assert!(
+            error.contains("(429)") && !error.contains("posctl login"),
+            "{error}"
+        );
+    }
+
+    /// A client whose commands share `user` as the NinjaOne user they run as.
+    fn api_as(fake: &crate::fake::Fake, user: Option<i64>) -> (Api, Rc<crate::fake::Memory>) {
+        let shared = Rc::new(crate::fake::Memory::default());
+        shared.set_access_token("t");
+        if let Some(user) = user {
+            shared.set_user(user);
+        }
+        let api = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+        (api, shared)
+    }
+
+    #[test]
+    fn a_run_is_told_from_another_operators_by_who_asked() {
+        // Another operator's request for the same script landed between this run's two calls.
+        let activities: Activities = Default::default();
+        let fake = activity_tenant(&activities, |device, activities| {
+            let by = |user: i64| json!({"userId": user});
+            activities.push(activity(1, device, "START_REQUESTED", "theirs", by(7)));
+            activities.push(completed(2, device, "theirs", "SUCCESS", "OK\ttheirs"));
+            activities.push(activity(3, device, "START_REQUESTED", "mine", by(1)));
+            activities.push(completed(4, device, "mine", "SUCCESS", "OK\tmine"));
+            204
+        });
+        let (api, shared) = api_as(&fake, Some(1));
+        let mut run = api.start_script(1, 94, INVOKE_SCRIPT, "").unwrap();
+
+        let got = api.poll_script(&mut run).unwrap().unwrap();
+
+        assert_eq!(got.output, "OK\tmine");
+        // Two requests prove nothing about who this command runs as.
+        assert_eq!(shared.user(), Some(1));
+    }
+
+    #[test]
+    fn the_user_is_learned_from_a_request_that_stands_alone() {
+        let activities: Activities = Default::default();
+        let fake = activity_tenant(&activities, |device, activities| {
+            let by = json!({"userId": 4});
+            activities.push(activity(1, device, "START_REQUESTED", "mine", by));
+            activities.push(completed(2, device, "mine", "SUCCESS", "OK\tmine"));
+            204
+        });
+        // 9: learned wrongly once, and put right here.
+        for known in [None, Some(9)] {
+            activities.lock().unwrap().clear();
+            let (api, shared) = api_as(&fake, known);
+            let mut run = api.start_script(1, 94, INVOKE_SCRIPT, "").unwrap();
+
+            let got = api.poll_script(&mut run).unwrap().unwrap();
+
+            assert_eq!(got.output, "OK\tmine");
+            assert_eq!(shared.user(), Some(4));
+        }
     }
 }
