@@ -2,6 +2,7 @@
 //! handler and records it, a tenant of POSes that run the library scripts, and a relay.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -104,7 +105,16 @@ pub struct Pos {
     pub fail: Option<&'static str>,
     /// It never reports: its runs stay requested.
     pub silent: bool,
+    /// After a rekey, how many reads of its fields still show the old keys: NinjaOne's API shows what
+    /// a script wrote well after the run's result (design section 8).
+    pub publish_lag: usize,
 }
+
+/// The keys every POS of `pos_tenant` publishes when it is rekeyed.
+pub const REKEYED_RELAY_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKzrnuY+QFVYdlcM3rAtG7rrjbM3sTFMuqNQA+lyLRmx";
+pub const REKEYED_HOST_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMWCIw6gQBQLwAxaDS65lE3XM4XPCpxjgKPPiWg2ZwVk";
 
 impl Default for Pos {
     fn default() -> Pos {
@@ -119,6 +129,7 @@ impl Default for Pos {
             version: "4",
             fail: None,
             silent: false,
+            publish_lag: 0,
         }
     }
 }
@@ -128,6 +139,8 @@ impl Default for Pos {
 /// the last with the result and the script's output. Returns `pos` for the test's own assertions.
 pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
     let activities = Mutex::new(Vec::<Value>::new());
+    // Each rekeyed device, with how often its fields were read since.
+    let rekeyed = Mutex::new(HashMap::<i64, usize>::new());
     let served = pos.clone();
     let fake = Fake::start(move |method, path, body| {
         let (route, query) = path.split_once('?').unwrap_or((path, ""));
@@ -138,6 +151,7 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
         };
         let parts: Vec<&str> = route.trim_start_matches("/v2/").split('/').collect();
         let mut activities = activities.lock().unwrap();
+        let mut rekeyed = rekeyed.lock().unwrap();
         match (method, parts.as_slice()) {
             ("GET", ["organization", "3", "devices"]) => {
                 let after: i64 = param("after").map_or(0, |id| id.parse().unwrap());
@@ -152,16 +166,26 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
                     .retain(|device| device["id"].as_i64() > Some(after));
                 (200, devices)
             }
-            ("GET", ["device", "1", "custom-fields"]) => (
-                200,
-                json!({"posTunnelRelayKey": served.relay_key, "posTunnelHostKey": served.host_key,
-                    "posTunnelVersion": served.version, "rustdeskAudit": "x"}),
-            ),
-            ("GET", ["device", _, "custom-fields"]) => {
-                let pos = Pos::default();
+            ("GET", ["device", id, "custom-fields"]) => {
+                let device: i64 = id.parse().unwrap();
+                let pos = if device == 1 {
+                    served.clone()
+                } else {
+                    Pos::default()
+                };
+                let shown = rekeyed.get_mut(&device).is_some_and(|reads| {
+                    *reads += 1;
+                    *reads > pos.publish_lag
+                });
+                let (relay_key, host_key) = if shown {
+                    (REKEYED_RELAY_KEY, REKEYED_HOST_KEY)
+                } else {
+                    (pos.relay_key.as_str(), pos.host_key.as_str())
+                };
                 (
                     200,
-                    json!({"posTunnelRelayKey": pos.relay_key, "posTunnelHostKey": pos.host_key, "posTunnelVersion": "4"}),
+                    json!({"posTunnelRelayKey": relay_key, "posTunnelHostKey": host_key,
+                        "posTunnelVersion": pos.version, "rustdeskAudit": "x"}),
                 )
             }
             ("GET", ["device", id, "activities"]) => {
@@ -206,6 +230,12 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
                         "CHANGED\ttunnel\tstopped\r\nOK\tclose\tsession ended".to_owned()
                     }
                     (_, "Install") => "OK\tsignature\r\nOK\tcurrent\tversion 4".to_owned(),
+                    (_, "Rekey") => {
+                        rekeyed.insert(device, 0);
+                        format!(
+                            "CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{REKEYED_RELAY_KEY}\r\nCHANGED\tfield posTunnelHostKey\t{REKEYED_HOST_KEY}"
+                        )
+                    }
                     _ => format!("CHANGED\t{action}"),
                 };
                 let series = format!("series-{}", activities.len());
@@ -407,6 +437,7 @@ pub fn context<'a>(
             script: short,
             install: short,
             released: short,
+            published: short,
         },
     }
 }

@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, Any, override
 from urllib.parse import parse_qs, urlsplit
@@ -22,6 +23,8 @@ pytestmark = pytest.mark.skipif(os.environ.get("POS_TUNNEL_DOCKER") != "1", reas
 INSTALL_SCRIPT = 2
 # The admin's session key and bob's.
 BOTH_OPERATORS = 2
+# How long the fake NinjaOne still shows a field's old value after a script wrote it; the real one took 39 s (design 11).
+FIELD_LAG = 2.0
 
 
 class Pos:
@@ -92,7 +95,7 @@ class Pos:
         output = "CHANGED\tlease\trenewed"
       case _, "Rekey", _:
         self.exec("sh", "-c", "rm -f /root/relay_key /root/relay_key.pub && ssh-keygen -q -t ed25519 -N '' -C '' -f /root/relay_key")
-        output = "CHANGED\trelay key pair\tregenerated"
+        output = f"CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{self.public_key('/root/relay_key.pub')}"
       case _:
         pass
     return output
@@ -104,6 +107,8 @@ class Ninja:
   def __init__(self, pos: Pos) -> None:
     self.pos = pos
     self.activities: list[dict[str, Any]] = []
+    # The relay key the POS published before its last rekey, and until when the fields still show it.
+    self.stale: tuple[str, float] = ("", 0.0)
     self.lock = threading.Lock()
     ninja = self
 
@@ -139,8 +144,9 @@ class Ninja:
         device = {"id": 1, "displayName": "POS 1", "organizationId": 4, "rolePolicyId": 1, "offline": False}
         return 200, [] if int(query.get("after", 0)) else [device]
       case ["device", "1", "custom-fields"]:
+        stale, until = self.stale
         fields = {
-          "posTunnelRelayKey": self.pos.public_key("/root/relay_key.pub"),
+          "posTunnelRelayKey": stale if time.monotonic() < until else self.pos.public_key("/root/relay_key.pub"),
           "posTunnelHostKey": self.pos.public_key("/etc/ssh/ssh_host_ed25519_key.pub"),
           "posTunnelVersion": "4",
         }
@@ -163,7 +169,10 @@ class Ninja:
     if path != "/v2/device/1/script/run":
       return 404, {}
     run = json.loads(body)
+    before = self.pos.public_key("/root/relay_key.pub") if "-Action Rekey" in run["parameters"] else None
     output = self.pos.run(run["id"], run["parameters"])
+    if before:
+      self.stale = (before, time.monotonic() + FIELD_LAG)
     done = {
       "activityResult": "FAILURE" if output.startswith("FAILED") else "SUCCESS",
       "data": {"message": {"params": {"output_message": output}}},

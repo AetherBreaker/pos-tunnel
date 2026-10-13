@@ -30,6 +30,8 @@ pub struct Timing {
     pub install: Duration,
     /// For the relay to drop a lease that has ended, which it does at its next pass (design section 6.5).
     pub released: Duration,
+    /// For NinjaOne to show the fields a script wrote: 39 s on the test POS (design section 11).
+    pub published: Duration,
 }
 
 impl Default for Timing {
@@ -40,6 +42,7 @@ impl Default for Timing {
             script: Duration::from_secs(120),
             install: Duration::from_secs(900),
             released: Duration::from_secs(60),
+            published: Duration::from_secs(180),
         }
     }
 }
