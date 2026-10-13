@@ -164,8 +164,8 @@ fn main() -> Result<()> {
             client_id,
             organization_id,
             pos_policy_id,
-            install_script_id: script("Install-PosTunnel")?,
-            invoke_script_id: script("Invoke-PosTunnel")?,
+            install_script_id: script(ninja::INSTALL_SCRIPT)?,
+            invoke_script_id: script(ninja::INVOKE_SCRIPT)?,
         };
         // A rerun keeps the relay this workstation already pins, also from a file that predates a field.
         let path = Config::path()?;

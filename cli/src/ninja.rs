@@ -21,6 +21,10 @@ use ssh_key::rand_core::{OsRng, RngCore};
 use ureq::Agent;
 
 const SCOPE: &str = "monitoring management offline_access";
+/// The library scripts' names (design section 7.1): `posctl-admin init` finds them by name, and a run's
+/// activities carry it.
+pub const INSTALL_SCRIPT: &str = "Install-PosTunnel";
+pub const INVOKE_SCRIPT: &str = "Invoke-PosTunnel";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Signs in through the browser and stores the refresh token.
@@ -171,7 +175,9 @@ fn snippet(body: &str) -> String {
     body.chars().take(300).collect()
 }
 
-/// The refresh token: Windows Credential Manager on Windows (design section 3), a user-only file elsewhere.
+/// The refresh token: Windows Credential Manager on Windows (design section 3), a user-only file elsewhere
+/// and wherever `POSCTL_CONFIG_HOME` is set, so a second identity has its own sign-in and a test never
+/// reads the real one (design section 8).
 pub mod token_store {
     use anyhow::{Context, Result};
 
@@ -192,32 +198,27 @@ pub mod token_store {
         )?)
     }
 
-    #[cfg(windows)]
-    pub fn save(token: &str) -> Result<()> {
-        Ok(entry()?.set_password(token)?)
-    }
-
-    #[cfg(windows)]
-    pub fn load() -> Result<String> {
-        entry()?
-            .get_password()
-            .context("not signed in to NinjaOne: run `posctl login`")
-    }
-
-    #[cfg(not(windows))]
     fn path() -> Result<std::path::PathBuf> {
         Ok(crate::config::config_home()?
             .join("posctl")
             .join("refresh_token"))
     }
 
-    #[cfg(not(windows))]
     pub fn save(token: &str) -> Result<()> {
+        #[cfg(windows)]
+        if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
+            return Ok(entry()?.set_password(token)?);
+        }
         crate::config::write_private(&path()?, token.as_bytes())
     }
 
-    #[cfg(not(windows))]
     pub fn load() -> Result<String> {
+        #[cfg(windows)]
+        if std::env::var_os("POSCTL_CONFIG_HOME").is_none() {
+            return entry()?
+                .get_password()
+                .context("not signed in to NinjaOne: run `posctl login`");
+        }
         Ok(std::fs::read_to_string(path()?)
             .context("not signed in to NinjaOne: run `posctl login`")?
             .trim()
@@ -265,6 +266,35 @@ pub struct FieldDefinition {
     pub definition_scope: Vec<String>,
     pub script_permission: Option<String>,
     pub api_permission: Option<String>,
+}
+
+/// A requested script run, followed through the device's activity list (design section 8, script
+/// results).
+#[derive(Debug)]
+pub struct ScriptRun {
+    pub device: i64,
+    name: &'static str,
+    /// The device's newest activity before the request.
+    after: i64,
+    /// The run's `seriesUid`, once its `START_REQUESTED` activity has shown up.
+    series: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScriptResult {
+    /// NinjaOne's verdict, and no `FAILED` line in the output.
+    pub success: bool,
+    /// What the script printed. The POS's words: untrusted, shown as its report and nothing more.
+    pub output: String,
+}
+
+impl ScriptResult {
+    /// A step put off to a later run (a session is open, a restart is pending): design section 7.1.
+    pub fn deferred(&self) -> bool {
+        self.output
+            .lines()
+            .any(|line| line.starts_with("DEFERRED\t"))
+    }
 }
 
 impl Api {
@@ -415,6 +445,125 @@ impl Api {
             Some(&body),
         )
         .map(drop)
+    }
+
+    /// The device's custom fields, name to value; a field never set is absent.
+    pub fn custom_fields(&self, device: i64) -> Result<serde_json::Map<String, Value>> {
+        self.get(&format!("/v2/device/{device}/custom-fields"))
+    }
+
+    /// `run_script`, returning what `poll_script` follows the run by: `script/run` itself returns
+    /// nothing, so the device's newest activity is noted first and the run is the first request after it.
+    pub fn start_script(
+        &self,
+        device: i64,
+        script: i64,
+        name: &'static str,
+        parameters: &str,
+    ) -> Result<ScriptRun> {
+        let before: Value = self.get(&format!("/v2/device/{device}/activities?pageSize=10"))?;
+        let after = before["lastNodeActivityId"].as_i64().unwrap_or(0);
+        self.run_script(device, script, parameters)?;
+        Ok(ScriptRun {
+            device,
+            name,
+            after,
+            series: None,
+        })
+    }
+
+    /// One look at a run: its result once the POS has finished, `None` until then.
+    pub fn poll_script(&self, run: &mut ScriptRun) -> Result<Option<ScriptResult>> {
+        let device = run.device;
+        if run.series.is_none() {
+            let reply: Value = self.get(&format!(
+                "/v2/device/{device}/activities?newerThan={}&pageSize=200",
+                run.after
+            ))?;
+            // Newest first, so the last match is the oldest request since `after`: this run's. By
+            // series from here on, not by name: a late `Open` and the `Close` that follows a timed-out
+            // `connect` are both `Invoke-PosTunnel`.
+            run.series = reply["activities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rfind(|a| a["statusCode"] == "START_REQUESTED" && a["sourceName"] == run.name)
+                .and_then(|a| a["seriesUid"].as_str().map(str::to_owned));
+        }
+        let Some(series) = &run.series else {
+            return Ok(None);
+        };
+        let reply: Value = self.get(&format!(
+            "/v2/device/{device}/activities?seriesUid={series}&pageSize=10"
+        ))?;
+        let Some(done) = reply["activities"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|a| a["statusCode"] == "COMPLETED")
+        else {
+            return Ok(None);
+        };
+        let output = done["data"]["message"]["params"]["output_message"]
+            .as_str()
+            .or(done["message"].as_str())
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        let output = output.trim_end().to_owned();
+        // Both: NinjaOne's verdict follows the exit code, and a `FAILED` line is the script's own word.
+        let success = done["activityResult"] == "SUCCESS"
+            && !output.lines().any(|line| line.starts_with("FAILED\t"));
+        Ok(Some(ScriptResult { success, output }))
+    }
+
+    /// Runs a library script on every device in `devices` at once and waits for each result, in their
+    /// order. A device NinjaOne refuses, or that reports nothing within `timeout`, gets an error; the
+    /// others still finish.
+    pub fn run_scripts(
+        &self,
+        devices: &[i64],
+        script: i64,
+        name: &'static str,
+        parameters: &str,
+        timeout: Duration,
+        poll: Duration,
+    ) -> Vec<Result<ScriptResult>> {
+        let mut pending: Vec<(usize, ScriptRun)> = Vec::new();
+        let mut results: Vec<Option<Result<ScriptResult>>> = Vec::new();
+        for (index, &device) in devices.iter().enumerate() {
+            match self.start_script(device, script, name, parameters) {
+                Ok(run) => {
+                    pending.push((index, run));
+                    results.push(None);
+                }
+                Err(e) => results.push(Some(Err(e))),
+            }
+        }
+        let deadline = Instant::now() + timeout;
+        loop {
+            pending.retain_mut(|(index, run)| match self.poll_script(run).transpose() {
+                Some(result) => {
+                    results[*index] = Some(result);
+                    false
+                }
+                None => true,
+            });
+            if pending.is_empty() || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(poll);
+        }
+        results
+            .into_iter()
+            .map(|result| {
+                result.unwrap_or_else(|| {
+                    bail!(
+                        "the POS reported no result for {name} within {}",
+                        humantime::format_duration(timeout)
+                    )
+                })
+            })
+            .collect()
     }
 }
 
@@ -570,6 +719,183 @@ mod tests {
         assert!(
             error.contains("run `posctl login`") && error.contains("invalid_grant"),
             "{error}"
+        );
+    }
+
+    type Activities = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
+
+    fn activity(id: i64, device: i64, status: &str, series: &str, extra: Value) -> Value {
+        let mut activity = json!({"id": id, "deviceId": device, "statusCode": status,
+            "sourceName": INVOKE_SCRIPT, "seriesUid": series});
+        let fields = activity.as_object_mut().unwrap();
+        fields.extend(extra.as_object().unwrap().clone());
+        activity
+    }
+
+    fn completed(id: i64, device: i64, series: &str, result: &str, output: &str) -> Value {
+        let extra = json!({"activityResult": result, "data": {"message": {"params": {"output_message": output}}}});
+        activity(id, device, "COMPLETED", series, extra)
+    }
+
+    /// A tenant that lists `activities` as NinjaOne does (newest first, `newerThan` and `seriesUid`
+    /// filtering) and on a script run does `on_run`, which gets the device and returns the status.
+    fn activity_tenant(
+        activities: &Activities,
+        on_run: impl Fn(i64, &mut Vec<Value>) -> u16 + Send + 'static,
+    ) -> crate::fake::Fake {
+        let activities = std::sync::Arc::clone(activities);
+        crate::fake::Fake::start(move |method, path, _| {
+            let (route, query) = path.split_once('?').unwrap_or((path, ""));
+            let param = |name: &str| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
+            };
+            let device: i64 = route.split('/').nth(3).unwrap().parse().unwrap();
+            let mut activities = activities.lock().unwrap();
+            if method == "POST" {
+                return (on_run(device, &mut activities), Value::Null);
+            }
+            let newer: i64 = param("newerThan").map_or(0, |id| id.parse().unwrap());
+            let of_device: Vec<&Value> = activities
+                .iter()
+                .filter(|a| a["deviceId"] == device)
+                .collect();
+            let listed: Vec<&Value> = of_device
+                .iter()
+                .rev()
+                .filter(|a| match param("seriesUid") {
+                    Some(series) => a["seriesUid"] == series,
+                    None => a["id"].as_i64() > Some(newer),
+                })
+                .copied()
+                .collect();
+            let last = of_device.last().map(|a| a["id"].clone());
+            (
+                200,
+                json!({"activities": listed, "lastNodeActivityId": last}),
+            )
+        })
+    }
+
+    #[test]
+    fn a_script_run_is_followed_by_its_own_series() {
+        // An earlier Invoke-PosTunnel run on the device was requested before this one and ends after it.
+        let activities: Activities = Default::default();
+        activities
+            .lock()
+            .unwrap()
+            .push(activity(10, 1, "START_REQUESTED", "earlier", json!({})));
+        let fake = activity_tenant(&activities, |device, activities| {
+            activities.push(activity(11, device, "START_REQUESTED", "this", json!({})));
+            204
+        });
+        let api = Api::with_token(&fake.url, "t");
+
+        let mut run = api
+            .start_script(1, 94, INVOKE_SCRIPT, "-Action Close")
+            .unwrap();
+        assert_eq!(api.poll_script(&mut run).unwrap(), None);
+        let earlier = completed(12, 1, "earlier", "SUCCESS", "CHANGED\ttunnel\tport 20001");
+        activities.lock().unwrap().push(earlier);
+        assert_eq!(api.poll_script(&mut run).unwrap(), None);
+        let this = completed(13, 1, "this", "SUCCESS", "OK\tclose\tsession ended\r\n");
+        activities.lock().unwrap().push(this);
+
+        assert_eq!(
+            api.poll_script(&mut run).unwrap(),
+            Some(ScriptResult {
+                success: true,
+                output: "OK\tclose\tsession ended".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_script_result_is_a_failure_on_ninjaones_word_or_a_failed_line() {
+        for (result, output, success, deferred) in [
+            (
+                "SUCCESS",
+                "OK\tfolder\r\nCHANGED\tcurrent\tversion 4",
+                true,
+                false,
+            ),
+            ("FAILURE", "", false, false),
+            (
+                "SUCCESS",
+                "OK\tfolder\r\nFAILED\tsetup\tno relay",
+                false,
+                false,
+            ),
+            (
+                "SUCCESS",
+                "OK\tfolder\r\nDEFERRED\tsession\ta session is open",
+                true,
+                true,
+            ),
+        ] {
+            let activities: Activities = Default::default();
+            let fake = activity_tenant(&activities, move |device, activities| {
+                activities.push(activity(1, device, "START_REQUESTED", "s", json!({})));
+                activities.push(completed(2, device, "s", result, output));
+                204
+            });
+            let api = Api::with_token(&fake.url, "t");
+            let mut run = api.start_script(1, 93, INVOKE_SCRIPT, "").unwrap();
+            let got = api.poll_script(&mut run).unwrap().unwrap();
+            assert_eq!(
+                (got.success, got.deferred()),
+                (success, deferred),
+                "{output}"
+            );
+            assert_eq!(got.output, output.replace("\r\n", "\n"));
+        }
+    }
+
+    #[test]
+    fn scripts_run_together_and_one_refusal_or_silence_fails_alone() {
+        let activities: Activities = Default::default();
+        // Device 5 is refused, 6 reports, 7 is requested and never answers.
+        let fake = activity_tenant(&activities, |device, activities| {
+            let id = activities.len() as i64 * 2;
+            let series = format!("s{device}");
+            match device {
+                5 => return 500,
+                6 => {
+                    activities.push(activity(id + 1, 6, "START_REQUESTED", &series, json!({})));
+                    activities.push(completed(id + 2, 6, &series, "SUCCESS", "CHANGED\tfields"));
+                }
+                _ => activities.push(activity(
+                    id + 1,
+                    device,
+                    "START_REQUESTED",
+                    &series,
+                    json!({}),
+                )),
+            }
+            204
+        });
+        let api = Api::with_token(&fake.url, "t");
+
+        let results = api.run_scripts(
+            &[5, 6, 7],
+            94,
+            INVOKE_SCRIPT,
+            "-Action Rekey",
+            Duration::from_millis(200),
+            Duration::from_millis(5),
+        );
+
+        let refused = results[0].as_ref().unwrap_err().to_string();
+        assert!(
+            refused.contains("/v2/device/5/script/run failed (500)"),
+            "{refused}"
+        );
+        assert!(results[1].as_ref().unwrap().success);
+        let silent = results[2].as_ref().unwrap_err().to_string();
+        assert!(
+            silent.contains("the POS reported no result for Invoke-PosTunnel within 200ms"),
+            "{silent}"
         );
     }
 }

@@ -104,7 +104,7 @@ Each was settled by a probe or by the user; the spec records them.
 - Consumes: `Api::get`, `Api::run_script`, `crate::fake::Fake` (all existing).
 - Produces (`posctl::ninja`): `INSTALL_SCRIPT: &str = "Install-PosTunnel"`, `INVOKE_SCRIPT: &str = "Invoke-PosTunnel"`; `ScriptRun` (opaque but for `pub device: i64`); `ScriptResult { pub success: bool, pub output: String }` with `deferred(&self) -> bool`; `Api::custom_fields(&self, device: i64) -> Result<serde_json::Map<String, Value>>`; `Api::start_script(&self, device: i64, script: i64, name: &'static str, parameters: &str) -> Result<ScriptRun>`; `Api::poll_script(&self, run: &mut ScriptRun) -> Result<Option<ScriptResult>>`; `Api::run_scripts(&self, devices: &[i64], script: i64, name: &'static str, parameters: &str, timeout: Duration, poll: Duration) -> Vec<Result<ScriptResult>>` (one result per device, in order). `token_store::save`/`load` keep their signatures.
 
-- [ ] **Step 1: Add the tests**
+- [x] **Step 1: Add the tests**
 
 In `cli/src/ninja.rs`, inside `mod tests`, after the last test (`an_unreachable_ninjaone_is_not_blamed_on_the_sign_in`) and before the module's closing brace:
 
@@ -287,12 +287,12 @@ In `cli/src/ninja.rs`, inside `mod tests`, after the last test (`an_unreachable_
     }
 ```
 
-- [ ] **Step 2: Run them to watch them fail**
+- [x] **Step 2: Run them to watch them fail**
 
 Run: `cargo test --lib 2>&1 | grep -E "^error" | sort -u | head -5`
 Expected: compile errors for what Step 3 adds, such as `` error[E0425]: cannot find value `INVOKE_SCRIPT` in this scope `` and `` error[E0422]: cannot find struct, variant or union type `ScriptResult` in this scope ``.
 
-- [ ] **Step 3: Add the code**
+- [x] **Step 3: Add the code**
 
 Apply to `cli/src/ninja.rs` (the constants, the token store reading a file wherever `POSCTL_CONFIG_HOME` is set, the two types, and four `Api` methods):
 
@@ -546,7 +546,7 @@ And in `cli/src/bin/posctl-admin.rs`, the names `init` looks the scripts up by c
          let path = Config::path()?;
 ```
 
-- [ ] **Step 4: Check and commit**
+- [x] **Step 4: Check and commit**
 
 Run `cargo fmt`, then the check. Expected: `test result: ok. 42 passed`, nothing from clippy or fmt.
 
