@@ -367,7 +367,7 @@ fn main() -> Result<()> {
                         }
                     }
                     if failed > 0 {
-                        bail!("{failed} POS(es) weren't rekeyed");
+                        bail!("{failed} POS(es) failed: see above");
                     }
                 }
                 _ => unreachable!("handled above"),
