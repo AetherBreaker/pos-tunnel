@@ -1,5 +1,5 @@
-//! The core `posctl` and `posctl-admin` share: config, keys, the NinjaOne API, and the fleet and admin
-//! operations. Design: `docs/design.md`.
+//! The core `posctl` and `posctl-admin` share: config, keys, the NinjaOne API, the fleet and admin
+//! operations, and `posctl`'s sessions. Design: `docs/design.md`.
 
 pub mod admin;
 pub mod bundle;
@@ -7,6 +7,9 @@ pub mod config;
 pub mod fleet;
 pub mod keys;
 pub mod ninja;
+pub mod relay;
+pub mod session;
+pub mod workstation;
 
 #[cfg(test)]
 mod fake;

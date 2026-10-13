@@ -582,7 +582,7 @@ EOF
 - Produces (`posctl::session`): `MAX_IDLE: Duration`; `Timing { poll, open, script, install, released: Duration }` with `Default`; `Context<'a> { api: &'a Api, ninja: &'a NinjaOne, relay: &'a dyn Relay, workstation: &'a Workstation, timing: Timing }`; `span(seconds: u64) -> String`; `How { Opened, Joined, AlreadyOpen }`; `Connected { alias: String, lease: Lease, how: How }`; `connect(&Context, name: &str, idle: Duration) -> Result<Connected>`; `keepalive(&Context, name) -> Result<Lease>`; `Row { name: String, alias: Option<String>, lease: Lease }`; `status(&Context, name: Option<&str>) -> Result<Vec<Row>>`; `PosSide { Confirmed(String), Offline, Unconfirmed(String) }`; `Closed { had_lease: bool, pos: PosSide }`; `close(&Context, name) -> Result<Closed>`; `pub(crate) end(&Context, &Device) -> Result<Closed>`; `rebuild(&Context, name) -> Result<Connected>`.
 - Produces (`crate::fake`, tests only): `Pos { offline: bool, relay_key: String, host_key: String, version: &'static str, fail: Option<&'static str>, silent: bool }` with `Default`; `pos_tenant(Pos) -> (Fake, Pos)` (organization 3: device 1 `POS 000 Test` as given, 2 `POS 002` online, 3 `POS 003` offline; script IDs 93 install, 94 invoke); `FakeRelay::new(operator)` with `leases`, `logins`, `login_error`, `listening`, `starting_after`, `linger`, `calls()`, `count(command)`, `open_as(operator, device_id)`; `workstation(test: &str) -> Workstation`; `context(&Api, &FakeRelay, &Workstation) -> Context`.
 
-- [ ] **Step 1: List the modules**
+- [x] **Step 1: List the modules**
 
 `cli/src/lib.rs` becomes (Task 3 adds `rekey`):
 
@@ -604,7 +604,7 @@ pub mod workstation;
 mod fake;
 ```
 
-- [ ] **Step 2: Replace `cli/src/fake.rs`**
+- [x] **Step 2: Replace `cli/src/fake.rs`**
 
 The existing `Fake` stays as it is; the rest is new.
 
@@ -1023,7 +1023,7 @@ pub fn context<'a>(
 }
 ```
 
-- [ ] **Step 3: Write the tests**
+- [x] **Step 3: Write the tests**
 
 Create each of the three files holding only its tests module; Steps 5 to 7 put the code above it.
 
@@ -1827,12 +1827,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Run them to watch them fail**
+- [x] **Step 4: Run them to watch them fail**
 
 Run: `cargo test --lib 2>&1 | grep -E "^error" | sort -u | head -5`
 Expected: compile errors, the tests' `use super::*` and `fake.rs`'s imports finding nothing yet, such as `` error[E0432]: unresolved imports `crate::relay::Lease`, `crate::relay::Relay`, `crate::relay::Starting` ``.
 
-- [ ] **Step 5: Write `relay.rs`**
+- [x] **Step 5: Write `relay.rs`**
 
 Above the tests module in `cli/src/relay.rs`:
 
@@ -1985,7 +1985,7 @@ impl Relay for SshRelay {
 }
 ```
 
-- [ ] **Step 6: Write `workstation.rs`**
+- [x] **Step 6: Write `workstation.rs`**
 
 Above the tests module in `cli/src/workstation.rs`:
 
@@ -2278,7 +2278,7 @@ impl Workstation {
 }
 ```
 
-- [ ] **Step 7: Write `session.rs`**
+- [x] **Step 7: Write `session.rs`**
 
 Above the tests module in `cli/src/session.rs`:
 
@@ -2717,7 +2717,7 @@ pub fn rebuild(ctx: &Context, name: &str) -> Result<Connected> {
 }
 ```
 
-- [ ] **Step 8: Check and commit**
+- [x] **Step 8: Check and commit**
 
 Run `cargo fmt`, then the check. Expected: `test result: ok. 73 passed`, nothing from clippy or fmt. `workstation::tests::ssh_parses_the_generated_config` runs the `ssh` on `PATH` with `-G`, which only parses.
 
