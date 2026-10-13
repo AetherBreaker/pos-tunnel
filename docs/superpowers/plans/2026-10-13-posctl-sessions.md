@@ -3971,7 +3971,7 @@ EOF
 - Consumes: `Common.ps1`'s `Write-Result`, `Enter-Lock`, `Exit-Lock`, `Set-FileContent`, `Start-Sshd`, `Stop-Session` and its path variables (unchanged); `Invoke-PosTunnel.ps1`, which already passes `-Name value` pairs through, so the library script in NinjaOne stays as pasted.
 - Produces: `Open -Mode Join -Port <port> -SessionKey <base64>` printing `CHANGED<TAB>session key<TAB>added, <n> session keys` (or `OK<TAB>session key<TAB>already one of <n>`) and `CHANGED<TAB>lease<TAB>renewed`, or failing with `FAILED<TAB>session<TAB>no session is open` / `the open session is on port <p>` and tearing nothing down. `-IdleSeconds` is no longer mandatory (a join doesn't set it) but is still required and range-checked for a new session. `Close` prints `OK<TAB>close<TAB>session ended, <n> session key(s)`. `posctl` (Task 2) already sends the join and prints `Close`'s line.
 
-- [ ] **Step 1: Write the tests**
+- [x] **Step 1: Write the tests**
 
 These reconfigure the machine, so they run only in CI's `pos-integration` job (Step 5). The harness gets a second operator's key:
 
@@ -4081,7 +4081,7 @@ And the cases, in the order the suite's shared session needs them:
              Set-Content "$env:ProgramData\ssh\sshd_config" -Encoding ASCII -NoNewline
 ```
 
-- [ ] **Step 2: Rewrite `pos/package/Open.ps1`**
+- [x] **Step 2: Rewrite `pos/package/Open.ps1`**
 
 The new-session path is the old script's, indented under `else`; the join branch and the `catch`'s condition are new.
 
@@ -4192,7 +4192,7 @@ exit [int]($script:failed -gt 0)
 
 Then make it CRLF (Global Constraints): `sed -i 's/$/\r/' pos/package/Open.ps1`.
 
-- [ ] **Step 3: Have `Close` count the session keys**
+- [x] **Step 3: Have `Close` count the session keys**
 
 ```diff
 --- a/pos/package/Close.ps1
@@ -4211,7 +4211,7 @@ Then make it CRLF (Global Constraints): `sed -i 's/$/\r/' pos/package/Open.ps1`.
  } finally { Exit-Lock }
 ```
 
-- [ ] **Step 4: Check locally and commit**
+- [x] **Step 4: Check locally and commit**
 
 CI's first `pos-integration` step, run here in PowerShell. Expected: `problems: 0`.
 
