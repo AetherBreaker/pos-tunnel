@@ -12,7 +12,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::config::{NinjaOne, Relay as RelayConfig};
-use crate::ninja::Api;
+use crate::ninja::{Api, Shared};
 use crate::relay::{Lease, Relay, Starting};
 use crate::session::{Context, Timing};
 use crate::workstation::Workstation;
@@ -107,6 +107,31 @@ impl Fake {
             .filter(|(m, p, _, _)| m == method && p == path)
             .map(|(_, _, _, authorization)| authorization.clone())
             .collect()
+    }
+}
+
+/// What commands share (`Shared`), held in memory.
+#[derive(Default)]
+pub struct Memory {
+    access_token: RefCell<Option<String>>,
+    user: Cell<Option<i64>>,
+}
+
+impl Shared for Memory {
+    fn access_token(&self) -> Option<String> {
+        self.access_token.borrow().clone()
+    }
+
+    fn set_access_token(&self, token: &str) {
+        *self.access_token.borrow_mut() = Some(token.to_owned());
+    }
+
+    fn user(&self) -> Option<i64> {
+        self.user.get()
+    }
+
+    fn set_user(&self, user: i64) {
+        self.user.set(Some(user));
     }
 }
 
@@ -247,11 +272,11 @@ pub fn pos_tenant(pos: Pos) -> (Fake, Pos) {
                     (_, "Close") => {
                         "CHANGED\ttunnel\tstopped\r\nOK\tclose\tsession ended".to_owned()
                     }
-                    (_, "Install") => "OK\tsignature\r\nOK\tcurrent\tversion 4".to_owned(),
+                    (_, "Install") => "OK\tsignature\r\nOK\tfield posTunnelRelayKey\r\nOK\tfield posTunnelHostKey\r\nOK\tfield posTunnelVersion\r\nOK\tcurrent\tversion 4".to_owned(),
                     (_, "Rekey") => {
                         rekeyed.insert(device, 0);
                         format!(
-                            "CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{REKEYED_RELAY_KEY}\r\nCHANGED\tfield posTunnelHostKey\t{REKEYED_HOST_KEY}"
+                            "CHANGED\trelay key pair\tregenerated\r\nCHANGED\tfield posTunnelRelayKey\t{REKEYED_RELAY_KEY}\r\nCHANGED\tfield posTunnelHostKey\t{REKEYED_HOST_KEY}\r\nOK\tfield posTunnelVersion"
                         )
                     }
                     _ => format!("CHANGED\t{action}"),

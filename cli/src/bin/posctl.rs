@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
 use posctl::bundle::Bundle;
 use posctl::config::{Config, Relay, config_home, parse_host_port, write_private};
-use posctl::ninja::{Api, INSTALL_SCRIPT};
+use posctl::ninja::{Api, INSTALL_SCRIPT, Published};
 use posctl::rekey::{self, Outcome};
 use posctl::relay::SshRelay;
 use posctl::session::{self, Context, How, MAX_IDLE, PosSide, Timing, span};
@@ -188,11 +188,15 @@ fn main() -> Result<()> {
                 );
             }
             let deadline = Instant::now() + timing.published;
-            if !api.await_published(device.id, &result, deadline, timing.poll) {
-                bail!(
+            match api.await_published(device.id, &result, deadline, timing.poll) {
+                Published::Shown => {}
+                Published::TimedOut => bail!(
                     "{name} is installed, but NinjaOne didn't show what it published within {}: `posctl connect` fails until it does",
                     humantime::format_duration(timing.published)
-                );
+                ),
+                Published::CutShort => bail!(
+                    "{name} is installed, but its report came without the lines for its fields, so whether NinjaOne shows them yet isn't known: give it a minute before `posctl connect`"
+                ),
             }
         }
         command => {
