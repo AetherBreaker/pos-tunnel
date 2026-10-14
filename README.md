@@ -135,7 +135,8 @@ Done once, by the admin, in this order:
    ```
 
    It signs in, finds the organization, the POS policy and both scripts by exact name, and writes this
-   workstation's config. That organization is the only one the system touches.
+   workstation's config. That organization is the only one the system touches. To move to another
+   client app or NinjaOne user later: [docs/change-ninjaone-credentials.md](docs/change-ninjaone-credentials.md).
 3. **Signing key and first release.** `posctl-admin signing keygen` makes the passphrase-protected key,
    rewrites `pos/allowed_signers` and publishes the public key to `posTunnelSigner`. Then sign the
    package and release (see [Development](#development)). `posctl-admin signing publish <tag>` makes
@@ -154,6 +155,8 @@ redeploy, then `relay point`. It ends every open session, and prints the `posctl
 send the other operators.
 
 ## Adding an operator
+
+Step by step, with the commands for both sides: [docs/add-an-operator.md](docs/add-an-operator.md).
 
 1. The admin runs `posctl-admin operator add <name>`. It prints a one-line bundle holding the new
    operator's private key and the workstation config, once. Send it like a password (a password
