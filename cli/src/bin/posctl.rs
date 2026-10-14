@@ -4,7 +4,8 @@ use std::io::IsTerminal;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 use posctl::bundle::Bundle;
 use posctl::config::{Config, Relay, config_home, parse_host_port, write_private};
 use posctl::ninja::{Api, INSTALL_SCRIPT, Published};
@@ -12,7 +13,7 @@ use posctl::rekey::{self, Outcome};
 use posctl::relay::SshRelay;
 use posctl::session::{self, Context, How, MAX_IDLE, PosSide, Timing, span};
 use posctl::workstation::Workstation;
-use posctl::{fleet, keys, ninja};
+use posctl::{completion, fleet, keys, ninja};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -28,6 +29,7 @@ enum Command {
     /// Open a session to a POS, identified by its exact (case-sensitive) NinjaOne display name, or
     /// join the one another operator has open on it.
     Connect {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
         name: String,
         /// Idle timeout of a session this opens, at most the 12h default. A session joined keeps its
         /// own.
@@ -35,23 +37,37 @@ enum Command {
         idle_timeout: Option<Duration>,
     },
     /// Renew the session's idle timeout on the relay and the POS.
-    Keepalive { name: String },
+    Keepalive {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        name: String,
+    },
     /// Show open sessions and their remaining time.
-    Status { name: Option<String> },
+    Status {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        name: Option<String>,
+    },
     /// Close a session for every operator on it and tear down both sides.
-    Close { name: String },
+    Close {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        name: String,
+    },
     /// Break glass: close and reopen a session, resetting the 72h maximum.
     Rebuild {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
         name: String,
         /// Skip the confirmation prompt. Required when stdin is not a terminal.
         #[arg(long)]
         yes: bool,
     },
     /// Install or upgrade the POS package on a device now, instead of waiting for the daily run.
-    Update { name: String },
+    Update {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        name: String,
+    },
     /// Give a POS new key pairs: its relay key pair and its SSH server key pair.
     #[command(group(ArgGroup::new("target").required(true).args(["name", "all"])))]
     Rekey {
+        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
         name: Option<String>,
         /// Every online POS of the organization.
         #[arg(long)]
@@ -69,6 +85,20 @@ enum Command {
     /// Point this workstation at a relay (the line `posctl-admin relay point` prints).
     #[command(subcommand)]
     Relay(RelayCommand),
+    /// Tab completion of commands and POS names in PowerShell and Git Bash, posctl-admin's too.
+    #[command(subcommand)]
+    Completions(CompletionsCommand),
+}
+
+#[derive(Subcommand)]
+enum CompletionsCommand {
+    /// Add it to the Windows PowerShell profile and ~/.bashrc, which then load what
+    /// `completions <shell>` prints at each start.
+    Install,
+    /// Print the registration for Windows PowerShell.
+    Powershell,
+    /// Print the registration for bash.
+    Bash,
 }
 
 #[derive(Subcommand)]
@@ -114,7 +144,18 @@ fn confirmed(question: &str, yes: bool) -> Result<bool> {
 }
 
 fn main() -> Result<()> {
+    completion::answer(Cli::command);
     match Cli::parse().command {
+        Command::Completions(CompletionsCommand::Install) => {
+            for line in completion::install()? {
+                println!("{line}");
+            }
+            println!("It applies in a new PowerShell or Git Bash window.");
+        }
+        Command::Completions(CompletionsCommand::Powershell) => {
+            print!("{}", completion::POWERSHELL)
+        }
+        Command::Completions(CompletionsCommand::Bash) => print!("{}", completion::BASH),
         Command::Login => {
             let config = Config::load()?;
             ninja::login(&config.ninjaone.base_url, &config.ninjaone.client_id)?;

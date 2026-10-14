@@ -5,12 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::engine::ArgValueCandidates;
 use posctl::admin::{self, ALLOWED_SIGNERS, Operators};
 use posctl::bundle::Bundle;
 use posctl::config::{Config, NinjaOne, Relay, parse_host_port, pinned_relay};
 use posctl::ninja::{self, Api, Named};
-use posctl::{fleet, keys};
+use posctl::{completion, fleet, keys};
 use serde_json::json;
 
 const SIGNING_NAMESPACE: &str = "pos-tunnel-release";
@@ -74,7 +75,11 @@ enum RelayCommand {
         /// Run `Install-PosTunnel -Force` on this one POS only (its exact display name), to try a relay
         /// on a test device first. The organization's relay changes either way: its other POSes pick it
         /// up at their next scheduled install.
-        #[arg(long, value_name = "DISPLAY_NAME")]
+        #[arg(
+            long,
+            value_name = "DISPLAY_NAME",
+            add = ArgValueCandidates::new(completion::pos_names)
+        )]
         device: Option<String>,
     },
 }
@@ -110,6 +115,7 @@ enum OperatorCommand {
 }
 
 fn main() -> Result<()> {
+    completion::answer(Cli::command);
     let command = Cli::parse().command;
     // Before the admin check, which needs the config init writes.
     if let Command::Init {

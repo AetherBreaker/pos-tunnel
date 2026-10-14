@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod bundle;
+pub mod completion;
 pub mod config;
 pub mod fleet;
 pub mod keys;

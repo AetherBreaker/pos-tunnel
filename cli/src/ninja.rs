@@ -226,13 +226,15 @@ fn snippet(body: &str) -> String {
 }
 
 /// What the commands of one identity share, between runs and with each other while they overlap: the
-/// access token, since NinjaOne ends the one before at every sign-in, and the NinjaOne user they run
-/// as, which the API never states and a command learns from its own script run.
+/// access token, since NinjaOne ends the one before at every sign-in, the NinjaOne user they run
+/// as, which the API never states and a command learns from its own script run, and the POS names
+/// Tab completion offers.
 pub trait Shared {
     fn access_token(&self) -> Option<String>;
     fn set_access_token(&self, token: &str);
     fn user(&self) -> Option<i64>;
     fn set_user(&self, user: i64);
+    fn set_pos_names(&self, names: &[&str]);
 }
 
 /// The sign-in as stored: Windows Credential Manager on Windows, files elsewhere and
@@ -325,6 +327,13 @@ pub mod token_store {
         fn set_user(&self, user: i64) {
             let _ = write(USER, &user.to_string());
         }
+
+        /// A file beside the config even where the sign-in is in Credential Manager: not secret, and
+        /// read at every Tab.
+        fn set_pos_names(&self, names: &[&str]) {
+            let _ = crate::completion::names_path()
+                .and_then(|path| crate::completion::save_names(&path, names));
+        }
     }
 }
 
@@ -336,7 +345,7 @@ pub struct Api {
     /// The client ID and refresh token `call` signs in again with; none for a test's fixed token.
     refresh: Option<(String, String)>,
     /// None in tests that share nothing.
-    shared: Option<Rc<dyn Shared>>,
+    pub(crate) shared: Option<Rc<dyn Shared>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

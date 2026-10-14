@@ -131,9 +131,10 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
     Ok(missing.iter().map(|field| field.name).collect())
 }
 
-/// The POSes: the organization's devices whose effective policy is the POS policy.
+/// The POSes: the organization's devices whose effective policy is the POS policy. Their names are
+/// shared for Tab completion, so every command that lists them keeps the names current.
 pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
-    Ok(api
+    let poses: Vec<Device> = api
         .devices(ninja.organization_id)?
         .into_iter()
         // The organization's list should hold nothing else; a stray device is still not a POS.
@@ -141,7 +142,17 @@ pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
             device.organization_id == ninja.organization_id
                 && device.effective_policy() == Some(ninja.pos_policy_id)
         })
-        .collect())
+        .collect();
+    if let Some(shared) = &api.shared {
+        let mut names: Vec<&str> = poses
+            .iter()
+            .filter_map(|device| device.display_name.as_deref())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        shared.set_pos_names(&names);
+    }
+    Ok(poses)
 }
 
 /// The one POS whose display name is exactly `name` (case-sensitive). No match or
@@ -257,8 +268,11 @@ pub fn point_relay(
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use super::*;
-    use crate::fake::Fake;
+    use crate::fake::{Fake, Memory};
+    use crate::ninja::Shared;
 
     /// What NinjaOne lists at `path`. Organization 3 holds the POSes and an office PC; organization 5
     /// holds one device on the POS policy, which this system must never see. Any path but an
@@ -412,6 +426,25 @@ mod tests {
             .filter_map(|device| device.display_name)
             .collect();
         assert_eq!(names, ["POS 000 Test", "POS 001", "POS 900"]);
+    }
+
+    #[test]
+    fn a_device_listing_shares_the_pos_names_sorted_for_tab_completion() {
+        let fake = Fake::start(|_, path, _| {
+            let mut all = devices(path);
+            if !path.contains("&after=") {
+                all.as_array_mut().unwrap().push(json!({"id": 7, "displayName": "Back Office POS", "organizationId": 3, "rolePolicyId": 7}));
+            }
+            (200, all)
+        });
+        let shared = Rc::new(Memory::default());
+        shared.set_access_token("t");
+        let api = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
+        pos_devices(&api, &ninja()).unwrap();
+        assert_eq!(
+            *shared.pos_names.borrow(),
+            ["Back Office POS", "POS 000 Test", "POS 001", "POS 900"]
+        );
     }
 
     #[test]

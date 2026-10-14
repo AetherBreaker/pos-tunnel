@@ -108,11 +108,16 @@ posctl close "Store 42 Register 1"
 | `posctl login` | Signs in to NinjaOne in the browser. |
 | `posctl operator import` | Sets up this workstation from the bundle the admin sent (prompts for it). |
 | `posctl relay set <host>[:<port>] <public key>` | Points this workstation at a relay (the line `posctl-admin relay point` prints). |
+| `posctl completions install \| powershell \| bash` | Tab completion of commands, flags and POS names, `posctl-admin`'s too. `install` adds a line to the Windows PowerShell profile and `~/.bashrc` (Git Bash) that loads it at each start; `powershell` and `bash` print what that line loads. |
 
 `connect` adds `Include posctl/config` at the top of `~/.ssh/config` the first time, so the alias works
 from any `ssh`, Windows' or Git Bash's. A coding agent should give `connect` its full six minutes; a
 `connect` that is cut off anyway leaves a lease the next `connect` on that workstation recognises,
 ends and replaces. Commands of one operator can run at the same time.
+
+Tab completes a POS name exactly, case included, and quotes one that holds a space. The names are the
+organization's as the last command that listed its devices found them; a Tab refreshes them first when
+they are a day old, which takes about a second.
 
 ## Setting it up
 
@@ -155,8 +160,15 @@ send the other operators.
    manager), never by email or chat.
 2. The admin pastes the printed `OPERATOR_KEYS=` line into the relay's environment in Coolify and
    redeploys.
-3. The operator runs `uv tool install pos-tunnel`, then `posctl operator import` (paste the bundle at
-   the prompt), then `posctl login` as their own NinjaOne user.
+3. The operator installs `posctl` (and `uv tool update-shell` if uv says its bin folder isn't on
+   `PATH`; `uv tool upgrade pos-tunnel` upgrades it later):
+
+   ```powershell
+   uv tool install pos-tunnel --index https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple
+   ```
+
+   Then `posctl operator import` (paste the bundle at the prompt), `posctl login` as their own
+   NinjaOne user, and `posctl completions install` for Tab completion.
 
 An operator key with a passphrase must be in `ssh-agent`, since `posctl` runs `ssh` non-interactively;
 `posctl` says so, with the commands, when it isn't. `posctl-admin operator remove <name>` takes an
@@ -191,6 +203,7 @@ operator off (redeploy the relay with the line it prints).
 - `posctl\config.toml`: NinjaOne base URL and client ID, organization, POS policy and script IDs; the
   relay's host, port and public key; the operator key's path.
 - `posctl\sessions\<device ID>\`: each session's key and `session.toml`.
+- `posctl\pos_names`: the organization's POS names, for Tab completion.
 - Windows Credential Manager, service `posctl`: the NinjaOne refresh token, and the access token and
   NinjaOne user ID that commands share. `posctl login` replaces them.
 - `~\.ssh\posctl\config` and `known_hosts`: generated, rewritten by every session command. Don't edit.

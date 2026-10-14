@@ -116,6 +116,7 @@ impl Fake {
 pub struct Memory {
     access_token: RefCell<Option<String>>,
     user: Cell<Option<i64>>,
+    pub pos_names: RefCell<Vec<String>>,
 }
 
 impl Shared for Memory {
@@ -133,6 +134,10 @@ impl Shared for Memory {
 
     fn set_user(&self, user: i64) {
         self.user.set(Some(user));
+    }
+
+    fn set_pos_names(&self, names: &[&str]) {
+        *self.pos_names.borrow_mut() = names.iter().map(|&name| name.to_owned()).collect();
     }
 }
 
