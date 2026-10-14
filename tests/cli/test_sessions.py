@@ -233,6 +233,18 @@ class Stack:
       timeout=90,
     )
 
+  def tab(self, home: Path, line: str) -> list[str]:
+    """What Tab offers at the end of `line` in bash: posctl answering as its registration runs it."""
+    env = {
+      **os.environ,
+      "POSCTL_CONFIG_HOME": str(home),
+      "POSCTL_SSH_DIR": str(home / "ssh"),
+      "POSCTL_COMPLETE": "bash",
+      "POSCTL_COMPLETE_LINE": line,
+    }
+    exe = self.setup.bin / ("posctl.exe" if os.name == "nt" else "posctl")
+    return sh(str(exe), env=env, timeout=60).stdout.splitlines()
+
   def leases(self) -> list[dict[str, Any]]:
     return json.loads(self.setup.ctl_status(self.admin).stdout)
 
@@ -299,6 +311,11 @@ def test_keepalive_renews_the_relay_and_the_pos(stack: Stack):
   assert stack.ninja.actions()[-1] == "-Action Touch"
 
 
+def test_close_and_keepalive_complete_the_pos_with_a_session_on_the_relay(stack: Stack):
+  assert stack.tab(stack.bob, "posctl close ") == [r"POS\ 1", "--help"]
+  assert stack.tab(stack.admin, "posctl keepalive P") == [r"POS\ 1"]
+
+
 def test_close_ends_the_session_for_both_operators(stack: Stack):
   result = stack.posctl(stack.admin, "close", "POS 1")
 
@@ -308,6 +325,7 @@ def test_close_ends_the_session_for_both_operators(stack: Stack):
   wait_for("the lease to go", lambda: "No open sessions." in stack.posctl(stack.bob, "status").stdout, timeout=30)
   assert "Host pos-1" not in (stack.bob / "ssh" / "posctl" / "config").read_text(encoding="utf-8")
   assert not (stack.bob / "posctl" / "sessions" / "1").exists()
+  assert stack.tab(stack.bob, "posctl close P") == []
 
 
 def test_rebuild_reopens_with_a_new_lease(stack: Stack):

@@ -144,13 +144,12 @@ pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
         })
         .collect();
     if let Some(shared) = &api.shared {
-        let mut names: Vec<&str> = poses
+        let mut named: Vec<(i64, &str)> = poses
             .iter()
-            .filter_map(|device| device.display_name.as_deref())
+            .filter_map(|device| Some((device.id, device.display_name.as_deref()?)))
             .collect();
-        names.sort_unstable();
-        names.dedup();
-        shared.set_pos_names(&names);
+        named.sort_unstable_by_key(|&(id, name)| (name, id));
+        shared.set_poses(&named);
     }
     Ok(poses)
 }
@@ -429,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn a_device_listing_shares_the_pos_names_sorted_for_tab_completion() {
+    fn a_device_listing_shares_the_poses_sorted_by_name_for_tab_completion() {
         let fake = Fake::start(|_, path, _| {
             let mut all = devices(path);
             if !path.contains("&after=") {
@@ -441,10 +440,14 @@ mod tests {
         shared.set_access_token("t");
         let api = Api::with_refresh_token(&fake.url, "c", "r", Some(shared.clone())).unwrap();
         pos_devices(&api, &ninja()).unwrap();
-        assert_eq!(
-            *shared.pos_names.borrow(),
-            ["Back Office POS", "POS 000 Test", "POS 001", "POS 900"]
-        );
+        let expected = [
+            (7, "Back Office POS"),
+            (1, "POS 000 Test"),
+            (2, "POS 001"),
+            (4, "POS 900"),
+        ]
+        .map(|(id, name)| (id, name.to_owned()));
+        assert_eq!(*shared.poses.borrow(), expected);
     }
 
     #[test]

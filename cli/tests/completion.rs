@@ -15,7 +15,7 @@ fn setup(test: &str) -> (PathBuf, String) {
     std::fs::create_dir_all(home.join("posctl")).unwrap();
     std::fs::write(
         home.join("posctl").join("pos_names"),
-        "Bob's POS\nCaf\u{e9} POS\nPOS 000 Test\nPOS 001\nPOS-002",
+        "5\tBob's POS\n4\tCaf\u{e9} POS\n1\tPOS 000 Test\n2\tPOS 001\n3\tPOS-002",
     )
     .unwrap();
     let bins = Path::new(env!("CARGO_BIN_EXE_posctl")).parent().unwrap();
@@ -62,15 +62,21 @@ $lines = @(
     'posctl connect "POS 000',
     "posctl connect 'Bob''s",
     "posctl connect 'POS 000 Test' --i",
-    'posctl keepalive C',
+    'posctl update C',
     'posctl.exe status POS',
-    'posctl-admin relay point --device POS-'
+    'posctl-admin relay point --device POS-',
+    'posctl close ',
+    'posctl keepalive ',
+    'posctl close po'
 )
-foreach ($sub in 'close', 'rebuild', 'update', 'rekey') { $lines += "posctl $sub POS" }
+foreach ($sub in 'rebuild', 'update', 'rekey') { $lines += "posctl $sub POS" }
+# In the config home, which holds a folder `posctl` for PowerShell's own file completion to offer.
+Push-Location (Split-Path $env:OUT)
 $result = foreach ($line in $lines) {
     $tab = TabExpansion2 -inputScript $line -cursorColumn $line.Length
     "$line => " + ($tab.CompletionMatches.CompletionText -join '|')
 }
+Pop-Location
 $result += 'posc => ' + (TabExpansion2 -inputScript 'posc' -cursorColumn 4).CompletionMatches[0].CompletionText
 $result += 'posctl --version => ' + (posctl --version)
 $result | Set-Content -Encoding UTF8 $env:OUT
@@ -85,11 +91,16 @@ $result | Set-Content -Encoding UTF8 $env:OUT
         "posctl connect \"POS 000 => 'POS 000 Test'".to_owned(),
         "posctl connect 'Bob''s => 'Bob''s POS'".to_owned(),
         "posctl connect 'POS 000 Test' --i => --idle-timeout".to_owned(),
-        "posctl keepalive C => 'Caf\u{e9} POS'".to_owned(),
+        "posctl update C => 'Caf\u{e9} POS'".to_owned(),
         format!("posctl.exe status POS => {names}"),
         "posctl-admin relay point --device POS- => POS-002".to_owned(),
+        // They offer the POSes with a session on the relay, and this config has no relay to ask.
+        "posctl close  => --help".to_owned(),
+        "posctl keepalive  => --help".to_owned(),
+        // Nothing to offer: the word stays as typed, where PowerShell would offer the folder's files.
+        "posctl close po => po".to_owned(),
     ];
-    for sub in ["close", "rebuild", "update", "rekey"] {
+    for sub in ["rebuild", "update", "rekey"] {
         expected.push(format!("posctl {sub} POS => {names}"));
     }
     expected.push("posc => posctl".to_owned());

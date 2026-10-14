@@ -227,14 +227,14 @@ fn snippet(body: &str) -> String {
 
 /// What the commands of one identity share, between runs and with each other while they overlap: the
 /// access token, since NinjaOne ends the one before at every sign-in, the NinjaOne user they run
-/// as, which the API never states and a command learns from its own script run, and the POS names
-/// Tab completion offers.
+/// as, which the API never states and a command learns from its own script run, and the POSes (device
+/// ID and name) Tab completion offers.
 pub trait Shared {
     fn access_token(&self) -> Option<String>;
     fn set_access_token(&self, token: &str);
     fn user(&self) -> Option<i64>;
     fn set_user(&self, user: i64);
-    fn set_pos_names(&self, names: &[&str]);
+    fn set_poses(&self, poses: &[(i64, &str)]);
 }
 
 /// The sign-in as stored: Windows Credential Manager on Windows, files elsewhere and
@@ -330,9 +330,9 @@ pub mod token_store {
 
         /// A file beside the config even where the sign-in is in Credential Manager: not secret, and
         /// read at every Tab.
-        fn set_pos_names(&self, names: &[&str]) {
+        fn set_poses(&self, poses: &[(i64, &str)]) {
             let _ = crate::completion::names_path()
-                .and_then(|path| crate::completion::save_names(&path, names));
+                .and_then(|path| crate::completion::save_poses(&path, poses));
         }
     }
 }

@@ -15,6 +15,8 @@ use clap_complete::engine::{self, CompletionCandidate};
 use crate::config::{Config, config_home, write_private};
 use crate::fleet;
 use crate::ninja::Api;
+use crate::relay::{self, Relay, SshRelay};
+use crate::workstation::Workstation;
 
 /// What `posctl completions powershell` prints. The aliases put `posctl` ahead of `posctl-admin.exe`
 /// when Tab completes the command itself.
@@ -26,6 +28,7 @@ Register-ArgumentCompleter -Native -CommandName posctl, posctl.exe, posctl-admin
     # The words up to the cursor as PowerShell parsed them, unquoted, the last the word at the cursor.
     $words = @(foreach ($element in $commandAst.CommandElements) {
         if ($element.Extent.StartOffset -ge $cursorPosition) { break }
+        $typed = $element.Extent.Text
         if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
             $element.Value
         } else {
@@ -46,6 +49,8 @@ Register-ArgumentCompleter -Native -CommandName posctl, posctl.exe, posctl-admin
         [Console]::OutputEncoding = $encoding
         Remove-Item Env:\POSCTL_COMPLETE, Env:\POSCTL_COMPLETE_WORDS
     }
+    # Nothing to offer: the word as typed, or PowerShell offers the folder's files instead.
+    if (-not $lines -and $wordToComplete) { $lines = @($typed) }
     foreach ($line in $lines) {
         $value, $help = $line -split "`t", 2
         $tip = if ($help) { $help } else { $value }
@@ -103,16 +108,38 @@ pub fn pos_names() -> Vec<CompletionCandidate> {
     let Ok(path) = names_path() else {
         return Vec::new();
     };
-    // The listing rewrites the cache (`Shared::set_pos_names`).
-    let refresh = || {
-        let config = Config::load()?;
-        let ninja = &config.ninjaone;
-        fleet::pos_devices(&Api::connect(&ninja.base_url, &ninja.client_id)?, ninja).map(drop)
+    let mut names: Vec<String> = cached_poses(&path, &[], refresh)
+        .into_iter()
+        .map(|(_, name)| name)
+        .collect();
+    // Two POSes may share a name, which `find_pos` refuses but the list still shows once.
+    names.dedup();
+    names.into_iter().map(CompletionCandidate::new).collect()
+}
+
+/// The names of the POSes with a session open on the relay, for `close` and `keepalive`'s Tab: the
+/// relay is asked at each Tab, through the `ssh` config the session commands write.
+pub fn open_session_names() -> Vec<CompletionCandidate> {
+    let ask = || -> Result<Vec<String>> {
+        let workstation = Workstation::new(&Config::load()?)?;
+        let relay = SshRelay {
+            ssh: workstation.ssh.clone(),
+            config: workstation.config_file(),
+        };
+        Ok(open_names(&relay, &names_path()?, refresh))
     };
-    cached_names(&path, refresh)
+    ask()
+        .unwrap_or_default()
         .into_iter()
         .map(CompletionCandidate::new)
         .collect()
+}
+
+/// Rewrites the cache through NinjaOne: the device listing does (`Shared::set_poses`).
+fn refresh() -> Result<()> {
+    let config = Config::load()?;
+    let ninja = &config.ninjaone;
+    fleet::pos_devices(&Api::connect(&ninja.base_url, &ninja.client_id)?, ninja).map(drop)
 }
 
 pub(crate) fn names_path() -> Result<PathBuf> {
@@ -253,24 +280,64 @@ fn bash_words(line: &str) -> (Vec<String>, Quote) {
     (words, quote)
 }
 
-/// Writes the cache: a name per line.
-pub(crate) fn save_names(path: &Path, names: &[&str]) -> Result<()> {
-    write_private(path, names.join("\n").as_bytes())
+/// Writes the cache: a POS per line, its device ID, a tab and its name.
+pub(crate) fn save_poses(path: &Path, poses: &[(i64, &str)]) -> Result<()> {
+    let lines: Vec<String> = poses
+        .iter()
+        .map(|(id, name)| format!("{id}\t{name}"))
+        .collect();
+    write_private(path, lines.join("\n").as_bytes())
 }
 
-/// The cached names, after `refresh` rewrote them if the cache is missing or a day old. A failed
-/// refresh (no sign-in, no network) leaves the names as they were.
-fn cached_names(path: &Path, refresh: impl FnOnce() -> Result<()>) -> Vec<String> {
+/// The cached POSes, after `refresh` rewrote them if the cache is missing, a day old, unreadable (as
+/// written before it held device IDs) or lacks a device of `wanted`. A failed refresh (no sign-in, no
+/// network) leaves the POSes as they were.
+fn cached_poses(
+    path: &Path,
+    wanted: &[i64],
+    refresh: impl FnOnce() -> Result<()>,
+) -> Vec<(i64, String)> {
+    let read = || -> Option<Vec<(i64, String)>> {
+        let text = fs::read_to_string(path).ok()?;
+        text.lines()
+            .map(|line| {
+                let (id, name) = line.split_once('\t')?;
+                Some((id.parse().ok()?, name.to_owned()))
+            })
+            .collect()
+    };
     let fresh = fs::metadata(path)
         .and_then(|meta| meta.modified())
         .is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age < STALE));
-    if !fresh {
-        let _ = refresh();
+    match read() {
+        Some(poses)
+            if fresh
+                && wanted
+                    .iter()
+                    .all(|id| poses.iter().any(|(known, _)| known == id)) =>
+        {
+            poses
+        }
+        before => {
+            let _ = refresh();
+            read().or(before).unwrap_or_default()
+        }
     }
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .map(str::to_owned)
+}
+
+/// The names of the POSes the relay holds a lease for, whoever opened it; none when it can't be asked.
+fn open_names(relay: &dyn Relay, path: &Path, refresh: impl FnOnce() -> Result<()>) -> Vec<String> {
+    let Ok(leases) = relay::leases(relay) else {
+        return Vec::new();
+    };
+    let open: Vec<i64> = leases.iter().map(|lease| lease.device_id).collect();
+    if open.is_empty() {
+        return Vec::new();
+    }
+    cached_poses(path, &open, refresh)
+        .into_iter()
+        .filter(|(id, _)| open.contains(id))
+        .map(|(_, name)| name)
         .collect()
 }
 
@@ -319,6 +386,7 @@ mod tests {
     use clap_complete::engine::ArgValueCandidates;
 
     use super::*;
+    use crate::fake::FakeRelay;
 
     const NAMES: [&str; 4] = ["Bob's POS", "POS 000 Test", "POS 001", "POS-002"];
 
@@ -459,43 +527,105 @@ mod tests {
         );
     }
 
+    fn poses(poses: &[(i64, &str)]) -> Vec<(i64, String)> {
+        poses
+            .iter()
+            .map(|&(id, name)| (id, name.to_owned()))
+            .collect()
+    }
+
+    fn make_day_old(path: &Path) {
+        let day_old = SystemTime::now() - Duration::from_secs(24 * 60 * 60 + 60);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(day_old)
+            .unwrap();
+    }
+
     #[test]
     fn a_fresh_cache_is_read_without_asking_ninjaone() {
         let path = dir("fresh").join("pos_names");
-        save_names(&path, &["POS 000 Test", "POS 001"]).unwrap();
-        let names = cached_names(&path, || panic!("refreshed a fresh cache"));
-        assert_eq!(names, ["POS 000 Test", "POS 001"]);
+        save_poses(&path, &[(1, "POS 000 Test"), (2, "POS 001")]).unwrap();
+        let cached = cached_poses(&path, &[], || panic!("refreshed a fresh cache"));
+        assert_eq!(cached, poses(&[(1, "POS 000 Test"), (2, "POS 001")]));
     }
 
     #[test]
     fn a_missing_or_day_old_cache_is_refreshed_first() {
         let path = dir("refreshed").join("pos_names");
-        let refresh = || save_names(&path, &["POS 002"]);
-        assert_eq!(cached_names(&path, refresh), ["POS 002"]);
-        save_names(&path, &["POS 001"]).unwrap();
-        let day_old = SystemTime::now() - Duration::from_secs(24 * 60 * 60 + 60);
-        fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(day_old)
-            .unwrap();
-        assert_eq!(cached_names(&path, refresh), ["POS 002"]);
+        let refresh = || save_poses(&path, &[(3, "POS 002")]);
+        assert_eq!(cached_poses(&path, &[], refresh), poses(&[(3, "POS 002")]));
+        save_poses(&path, &[(2, "POS 001")]).unwrap();
+        make_day_old(&path);
+        assert_eq!(cached_poses(&path, &[], refresh), poses(&[(3, "POS 002")]));
+    }
+
+    #[test]
+    fn a_cache_without_device_ids_is_refreshed_first() {
+        let path = dir("names-only").join("pos_names");
+        fs::write(&path, "POS 000 Test\nPOS 001").unwrap();
+        let refresh = || save_poses(&path, &[(1, "POS 000 Test")]);
+        assert_eq!(
+            cached_poses(&path, &[], refresh),
+            poses(&[(1, "POS 000 Test")])
+        );
+    }
+
+    #[test]
+    fn a_device_the_cache_lacks_has_it_refreshed_first() {
+        let path = dir("lacking").join("pos_names");
+        save_poses(&path, &[(1, "POS 000 Test")]).unwrap();
+        let refresh = || save_poses(&path, &[(1, "POS 000 Test"), (5, "POS 005")]);
+        assert_eq!(
+            cached_poses(&path, &[5], refresh),
+            poses(&[(1, "POS 000 Test"), (5, "POS 005")])
+        );
     }
 
     #[test]
     fn a_failed_refresh_leaves_the_old_names() {
         let path = dir("failed").join("pos_names");
-        assert!(cached_names(&path, || bail!("not signed in")).is_empty());
-        save_names(&path, &["POS 001"]).unwrap();
-        let day_old = SystemTime::now() - Duration::from_secs(24 * 60 * 60 + 60);
-        fs::File::options()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_modified(day_old)
-            .unwrap();
-        assert_eq!(cached_names(&path, || bail!("offline")), ["POS 001"]);
+        assert!(cached_poses(&path, &[], || bail!("not signed in")).is_empty());
+        save_poses(&path, &[(2, "POS 001")]).unwrap();
+        make_day_old(&path);
+        assert_eq!(
+            cached_poses(&path, &[], || bail!("offline")),
+            poses(&[(2, "POS 001")])
+        );
+    }
+
+    #[test]
+    fn close_offers_the_poses_with_a_lease_on_the_relay_whoever_opened_it() {
+        let path = dir("open").join("pos_names");
+        save_poses(
+            &path,
+            &[(3, "Bob's POS"), (1, "POS 000 Test"), (2, "POS 001")],
+        )
+        .unwrap();
+        let relay = FakeRelay::new("admin");
+        relay.open_as("bob", 1);
+        relay.open_as("admin", 3);
+        let names = open_names(&relay, &path, || panic!("refreshed a fresh cache"));
+        assert_eq!(names, ["Bob's POS", "POS 000 Test"]);
+    }
+
+    #[test]
+    fn close_asks_ninjaone_nothing_while_the_relay_holds_no_lease() {
+        let path = dir("no-lease").join("pos_names");
+        let relay = FakeRelay::new("admin");
+        assert!(open_names(&relay, &path, || panic!("refreshed for no lease")).is_empty());
+    }
+
+    #[test]
+    fn close_offers_nothing_when_the_relay_cant_be_asked() {
+        let path = dir("unreachable").join("pos_names");
+        save_poses(&path, &[(1, "POS 000 Test")]).unwrap();
+        let relay = FakeRelay::new("admin");
+        relay.open_as("bob", 1);
+        relay.unreachable_at.set(Some(1));
+        assert!(open_names(&relay, &path, || Ok(())).is_empty());
     }
 
     #[test]

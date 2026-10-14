@@ -38,7 +38,7 @@ enum Command {
     },
     /// Renew the session's idle timeout on the relay and the POS.
     Keepalive {
-        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        #[arg(add = ArgValueCandidates::new(completion::open_session_names))]
         name: String,
     },
     /// Show open sessions and their remaining time.
@@ -48,7 +48,7 @@ enum Command {
     },
     /// Close a session for every operator on it and tear down both sides.
     Close {
-        #[arg(add = ArgValueCandidates::new(completion::pos_names))]
+        #[arg(add = ArgValueCandidates::new(completion::open_session_names))]
         name: String,
     },
     /// Break glass: close and reopen a session, resetting the 72h maximum.

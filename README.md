@@ -117,7 +117,9 @@ ends and replaces. Commands of one operator can run at the same time.
 
 Tab completes a POS name exactly, case included, and quotes one that holds a space. The names are the
 organization's as the last command that listed its devices found them; a Tab refreshes them first when
-they are a day old, which takes about a second.
+they are a day old, which takes about a second. After `close` and `keepalive`, Tab offers only the
+POSes with a session open on the relay, whoever opened it: each of those Tabs asks the relay (under a
+second), and offers nothing when it can't be reached.
 
 ## Setting it up
 
@@ -206,7 +208,7 @@ operator off (redeploy the relay with the line it prints).
 - `posctl\config.toml`: NinjaOne base URL and client ID, organization, POS policy and script IDs; the
   relay's host, port and public key; the operator key's path.
 - `posctl\sessions\<device ID>\`: each session's key and `session.toml`.
-- `posctl\pos_names`: the organization's POS names, for Tab completion.
+- `posctl\pos_names`: the organization's POS names and device IDs, for Tab completion.
 - Windows Credential Manager, service `posctl`: the NinjaOne refresh token, and the access token and
   NinjaOne user ID that commands share. `posctl login` replaces them.
 - `~\.ssh\posctl\config` and `known_hosts`: generated, rewritten by every session command. Don't edit.
