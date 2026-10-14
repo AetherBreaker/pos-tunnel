@@ -1,4 +1,4 @@
-//! `posctl/config.toml` (design section 8) and where both binaries keep their files.
+//! `posctl/config.toml` and where both binaries keep their files.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// The relay's published SSH port (design section 6.1).
+/// The relay's published SSH port.
 pub const DEFAULT_RELAY_PORT: u16 = 2222;
 
 /// Everything `posctl` needs besides the NinjaOne login. `posctl-admin init` writes it on the admin's
@@ -23,10 +23,10 @@ pub struct Config {
 pub struct NinjaOne {
     /// `https://<region>.ninjarmm.com`, no trailing slash.
     pub base_url: String,
-    /// The tenant's Native client app: PKCE, no secret (design section 11).
+    /// The tenant's Native client app: PKCE, no secret.
     pub client_id: String,
     /// The one organization this system works on: only its devices are listed, only its fleet fields
-    /// written (design section 8).
+    /// written.
     pub organization_id: i64,
     /// A device of that organization whose effective policy is this one is a POS.
     pub pos_policy_id: i64,

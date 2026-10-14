@@ -140,7 +140,7 @@ jobs:
         run: uv publish --index SFTPyPI dist/*.whl dist/*.tar.gz
 
   # Kept through setup-project by [tool.devkit].release-workflow-jobs. Attaches the POS package
-  # that Install-PosTunnel downloads (docs/design.md, section 7.1). The manifest and signature are
+  # that Install-PosTunnel downloads. The manifest and signature are
   # committed, signed on the operator workstation; this job only verifies and packs them.
   pos-package:
     name: "Publish: attach the signed POS package to the release"

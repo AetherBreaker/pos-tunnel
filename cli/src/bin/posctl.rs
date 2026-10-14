@@ -1,4 +1,4 @@
-//! `posctl`: on-demand SSH sessions to NinjaOne-managed POS machines. Design: `docs/design.md`.
+//! `posctl`: on-demand SSH sessions to NinjaOne-managed POS machines.
 
 use std::io::IsTerminal;
 use std::time::{Duration, Instant};
@@ -91,7 +91,7 @@ enum RelayCommand {
 
 fn parse_idle_timeout(s: &str) -> Result<Duration> {
     let d = humantime::parse_duration(s)?;
-    // The relay counts whole seconds, from 1 (design section 6.4).
+    // The relay counts whole seconds, from 1.
     if d.as_secs() == 0 || d.subsec_nanos() != 0 || d > MAX_IDLE {
         bail!("idle timeout must be whole seconds, from 1s to 12h");
     }
@@ -99,7 +99,7 @@ fn parse_idle_timeout(s: &str) -> Result<Duration> {
 }
 
 /// `--yes`, or a `y` typed at the terminal. Without a terminal there is nobody to ask, so an agent's
-/// shell gets a refusal that names the flag instead of a prompt it can't answer (design section 7.6).
+/// shell gets a refusal that names the flag instead of a prompt it can't answer.
 fn confirmed(question: &str, yes: bool) -> Result<bool> {
     if yes {
         return Ok(true);
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
                 bail!("the install on {name} was deferred: see its report above");
             }
             // `connect` reads the POS's keys and version from NinjaOne, which shows what the install
-            // wrote well after its result (design section 8).
+            // wrote well after its result.
             if !result.published().is_empty() {
                 eprintln!(
                     "Waiting for NinjaOne to show what {name} published (usually under a minute)..."

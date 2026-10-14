@@ -1,4 +1,4 @@
-//! The six custom fields and the fleet-wide NinjaOne operations of `posctl-admin` (design sections 3, 7.9).
+//! The six custom fields and the fleet-wide NinjaOne operations of `posctl-admin`.
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -50,7 +50,7 @@ pub const FIELDS: [Field; 6] = [
 impl Field {
     /// Definition scope, script permission, API permission. A device field is written by the POS's
     /// scripts and only read through the API; a fleet field has organization scope only and is read-only
-    /// to scripts, either of which stops a POS writing it (design section 3).
+    /// to scripts, either of which stops a POS writing it.
     fn settings(&self) -> [(&'static str, &'static str); 3] {
         if self.fleet {
             [
@@ -104,7 +104,7 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
     for field in &missing {
         let [(_, scope), (_, script), (_, api_permission)] = field.settings();
         // `scope` is deprecated in favour of `definitionScope`, but NinjaOne refuses a create without it;
-        // NODE_GLOBAL makes a global field (design section 3), as opposed to a role field.
+        // NODE_GLOBAL makes a global field, as opposed to a role field.
         api.create_field(&json!({
             "fieldName": field.name,
             "label": field.label,
@@ -131,7 +131,7 @@ pub fn ensure_fields(api: &Api) -> Result<Vec<&'static str>> {
     Ok(missing.iter().map(|field| field.name).collect())
 }
 
-/// The POSes: the organization's devices whose effective policy is the POS policy (design section 8).
+/// The POSes: the organization's devices whose effective policy is the POS policy.
 pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
     Ok(api
         .devices(ninja.organization_id)?
@@ -144,7 +144,7 @@ pub fn pos_devices(api: &Api, ninja: &NinjaOne) -> Result<Vec<Device>> {
         .collect())
 }
 
-/// The one POS whose display name is exactly `name` (case-sensitive, design section 4). No match or
+/// The one POS whose display name is exactly `name` (case-sensitive). No match or
 /// several is an error naming what was found.
 pub fn find_pos(api: &Api, ninja: &NinjaOne, name: &str) -> Result<Device> {
     let poses = pos_devices(api, ninja)?;
@@ -181,8 +181,7 @@ pub fn find_pos(api: &Api, ninja: &NinjaOne, name: &str) -> Result<Device> {
 }
 
 /// Writes fleet field values on the organization, after `ensure_fields`: the one door for a fleet-field
-/// write, so a changed definition is always refused first. A POS reads its organization's value
-/// (design section 3).
+/// write, so a changed definition is always refused first. A POS reads its organization's value.
 pub fn set_fleet_fields(api: &Api, ninja: &NinjaOne, values: &Value) -> Result<()> {
     ensure_fields(api)?;
     api.set_organization_fields(ninja.organization_id, values)
@@ -242,7 +241,7 @@ pub fn point_relay(
             offline.push(name);
         } else {
             // A refused run must not stop the rest: the POSes after it would stay on the old relay,
-            // unreachable (design section 7.9), with nothing saying which ones.
+            // unreachable, with nothing saying which ones.
             match api.run_script(device.id, ninja.install_script_id, "-Force") {
                 Ok(()) => ran.push(name),
                 Err(e) => failed.push(format!("{name}: {e:#}")),

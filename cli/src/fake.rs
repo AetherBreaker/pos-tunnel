@@ -150,7 +150,7 @@ pub struct Pos {
     /// It never reports: its runs stay requested.
     pub silent: bool,
     /// After a rekey, how many reads of its fields still show the old keys: NinjaOne's API shows what
-    /// a script wrote well after the run's result (design section 8).
+    /// a script wrote well after the run's result.
     pub publish_lag: usize,
     /// How many looks at its runs NinjaOne fails before it answers.
     pub flaky_looks: usize,

@@ -1,4 +1,4 @@
-//! `posctl rekey` (design section 7.8): new key pairs on one POS or on every online one.
+//! `posctl rekey`: new key pairs on one POS or on every online one.
 
 use std::time::Instant;
 
@@ -70,7 +70,7 @@ pub fn plan(ctx: &Context, name: Option<&str>, force: bool) -> Result<Plan> {
 }
 
 /// Carries `plan` out and returns one outcome per POS, the skipped ones included. With `force`, each
-/// target's session is ended first as `close` does (design section 7.5): its relay lease closed, then
+/// target's session is ended first as `close` does: its relay lease closed, then
 /// `Close` run on every target, with a lease or not, so a session left on a POS alone doesn't block
 /// its rekey. All POSes run together.
 pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcome)>> {
@@ -140,7 +140,7 @@ pub fn run(ctx: &Context, plan: Plan, force: bool) -> Result<Vec<(String, Outcom
                 Outcome::Failed(format!("it reported:\n{}", result.output))
             }
             // `connect` reads a POS's keys from NinjaOne, which shows new ones well after the run's
-            // result (design section 8); a `connect` before then would hand out the old ones.
+            // result; a `connect` before then would hand out the old ones.
             Ok(result) => match ctx
                 .api
                 .await_published(device.id, &result, deadline, ctx.timing.poll)

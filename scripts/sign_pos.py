@@ -1,4 +1,4 @@
-"""Sign or verify the POS package manifest (docs/design.md, section 7.1).
+"""Sign or verify the POS package manifest.
 
 Signing runs on the operator workstation only: the release key never reaches CI, so a compromised
 GitHub account can't produce a package the POS machines accept. ``--check`` (CI, and the release job

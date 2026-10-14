@@ -1,4 +1,4 @@
-//! The relay as an operator reaches it (design sections 6.4 and 8): `tunnelctl` as `ctl` over OpenSSH's
+//! The relay as an operator reaches it: `tunnelctl` as `ctl` over OpenSSH's
 //! client, and the login through a session's alias.
 
 use std::fmt;
@@ -18,10 +18,10 @@ use crate::ninja::Device;
 pub struct Lease {
     pub port: u16,
     pub device_id: i64,
-    /// Who opened it. An operator who joined later isn't recorded (design section 9).
+    /// Who opened it. An operator who joined later isn't recorded.
     pub operator: String,
-    /// When it was opened, as the relay printed it. Never compared with this machine's clock (design
-    /// section 5): it only tells one session on a port from the next (design section 8).
+    /// When it was opened, as the relay printed it. Never compared with this machine's clock: it only
+    /// tells one session on a port from the next.
     pub started: String,
     pub idle_remaining: u64,
     pub absolute_remaining: u64,
@@ -29,14 +29,14 @@ pub struct Lease {
     pub listening: bool,
 }
 
-/// `tunnelctl`'s exit status while the relay's daemon isn't answering (design section 6.4).
+/// `tunnelctl`'s exit status while the relay's daemon isn't answering.
 const EX_UNAVAILABLE: i32 = 75;
-/// The first login as `support` on a POS waits for Windows to create its profile (design section 7.2).
+/// The first login as `support` on a POS waits for Windows to create its profile.
 const LOGIN_WAIT: Duration = Duration::from_secs(120);
 /// For one `tunnelctl` command, which a healthy relay answers in a second or two.
 const TUNNELCTL_WAIT: Duration = Duration::from_secs(30);
 
-/// The relay's daemon isn't answering yet (design section 6.4).
+/// The relay's daemon isn't answering yet.
 #[derive(Debug)]
 pub struct Starting;
 
@@ -55,7 +55,7 @@ pub trait Relay {
     /// `tunnelctl <command>` as `ctl`; its output. Fails with `Starting` while the daemon isn't
     /// answering.
     fn tunnelctl(&self, command: &str) -> Result<String>;
-    /// Logs in through a session's alias once (design section 7.2, step 8).
+    /// Logs in through a session's alias once.
     fn login(&self, alias: &str) -> Result<()>;
 }
 
@@ -71,7 +71,7 @@ pub fn leases(relay: &dyn Relay) -> Result<Vec<Lease>> {
     ask(relay, "status")
 }
 
-/// The device's tunnel port, 20000 + its NinjaOne ID (design section 4).
+/// The device's tunnel port, 20000 + its NinjaOne ID.
 pub fn port(device: &Device) -> Result<u16> {
     match u16::try_from(device.id) {
         Ok(id @ 1..=45535) => Ok(20000 + id),
@@ -83,14 +83,14 @@ pub fn port(device: &Device) -> Result<u16> {
 }
 
 /// The real relay: OpenSSH's client with the generated config, which holds the relay's address, its
-/// pinned public key and the operator key (design section 8).
+/// pinned public key and the operator key.
 pub struct SshRelay {
     pub ssh: PathBuf,
     pub config: PathBuf,
 }
 
 /// Runs `command` to its end, or kills it at `limit`: `ConnectTimeout` covers the connection only,
-/// and a relay that stalls after it (design section 6.5) would hang `posctl` with nothing said.
+/// and a relay that stalls after it would hang `posctl` with nothing said.
 /// What it prints is read as it comes, so a reply longer than a pipe holds can't block it.
 fn run(command: &mut Command, limit: Duration, what: &str) -> Result<Output> {
     fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {

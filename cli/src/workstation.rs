@@ -1,4 +1,4 @@
-//! This workstation's side of its sessions (design section 8): the session state dir, the generated
+//! This workstation's side of its sessions: the session state dir, the generated
 //! `ssh` files, the `Include` line, and the OpenSSH client and agent that serve them.
 
 use std::fs;
@@ -41,7 +41,7 @@ pub struct Workstation {
     pub relay: config::Relay,
 }
 
-/// The display name's slug, prefixed `pos-` unless it starts so (design section 4): `POS 000 Test` is
+/// The display name's slug, prefixed `pos-` unless it starts so: `POS 000 Test` is
 /// `pos-000-test`. The device ID stands in for an empty slug and is appended to one in `taken`.
 pub fn alias(name: &str, device_id: i64, taken: &[&str]) -> String {
     let mut slug = String::new();
@@ -129,7 +129,7 @@ impl Workstation {
     }
 
     /// Stops when the operator key has a passphrase and `ssh-agent` doesn't hold it: `ssh` runs
-    /// non-interactively, so it would be refused with no hint why (design section 8).
+    /// non-interactively, so it would be refused with no hint why.
     pub fn check_operator_key(&self) -> Result<()> {
         let key = &self.operator_key;
         let text = fs::read_to_string(key).with_context(|| format!("reading {}", key.display()))?;
@@ -215,7 +215,7 @@ impl Workstation {
     }
 
     /// Notes the lease a `connect` has opened and not finished with, or is undoing, by its `started`
-    /// (design section 8). Cut off, the command leaves a lease nobody holds the session key of; the
+    ///. Cut off, the command leaves a lease nobody holds the session key of; the
     /// next `connect` here knows it by this note. `save` and `remove` clear it.
     pub fn set_pending(&self, device_id: i64, started: &str) -> Result<()> {
         let path = self.sessions.join(device_id.to_string()).join("pending");
@@ -255,7 +255,7 @@ impl Workstation {
     }
 
     /// Rewrites the generated `config` and `known_hosts` whole from the config and the session state;
-    /// nothing edits them in place (design section 8).
+    /// nothing edits them in place.
     pub fn write_ssh_files(&self) -> Result<()> {
         let _lock = self.lock()?;
         // Forward-slashed and quoted: a profile path may hold a space, and `ssh_config` reads a

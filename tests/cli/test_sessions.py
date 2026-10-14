@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("POS_TUNNEL_DOCKER") != "1", reas
 INSTALL_SCRIPT = 2
 # The admin's session key and bob's.
 BOTH_OPERATORS = 2
-# How long the fake NinjaOne still shows a field's old value after a script wrote it; the real one took 39 s (design 11).
+# How long the fake NinjaOne still shows a field's old value after a script wrote it; the real one took 39 s.
 FIELD_LAG = 2.0
 # An install's lines for the device fields when none changed; posctl takes a report without them for one cut short.
 UNCHANGED_FIELDS = "OK\tfield posTunnelRelayKey\r\nOK\tfield posTunnelHostKey\r\nOK\tfield posTunnelVersion"
@@ -35,7 +35,7 @@ class Pos:
   def __init__(self, setup: Setup) -> None:
     self.name = f"setup-pos-{setup.tag}"
     self.relay = setup.relay
-    # usermod: an account created locked is refused even for key auth (design 6.1).
+    # usermod: an account created locked is refused even for key auth.
     init = (
       "useradd -m -s /bin/sh support && usermod -p '*' support && mkdir -p /run/sshd"
       " && ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/ssh_host_ed25519_key"
@@ -70,7 +70,7 @@ class Pos:
     return len(self.exec("cat", "/etc/ssh/session_keys").stdout.splitlines())
 
   def run(self, script: int, parameters: str) -> str:
-    """Run a library script as the POS would, returning its output (design 7.1 to 7.8)."""
+    """Run a library script as the POS would, returning its output."""
     words = parameters.split()
     named = dict(zip(words[::2], words[1::2], strict=False))
     output = f"FAILED\tinvoke\tunexpected {parameters}"
@@ -253,7 +253,7 @@ def stack():
     for home in (s.admin_home, s.bob_home):
       config = home / "posctl" / "config.toml"
       config.write_text(config.read_text(encoding="utf-8").replace("https://example.invalid", ninja.url), encoding="utf-8")
-      # With POSCTL_CONFIG_HOME set the sign-in is this file on every platform (design 8).
+      # With POSCTL_CONFIG_HOME set the sign-in is this file on every platform.
       (home / "posctl" / "refresh_token").write_text("unused", encoding="utf-8")
     yield Stack(s, pos, ninja)
   finally:

@@ -1,4 +1,4 @@
-//! ed25519 key pairs in OpenSSH's formats (design section 3).
+//! ed25519 key pairs in OpenSSH's formats.
 
 use std::fs;
 use std::path::Path;

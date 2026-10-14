@@ -1,4 +1,4 @@
-//! The NinjaOne API (design section 8): the browser sign-in, the stored refresh token, and the calls
+//! The NinjaOne API: the browser sign-in, the stored refresh token, and the calls
 //! both binaries make.
 //!
 //! Running a script needs a user's token (a client-credentials token gets `user_context_required`), so
@@ -24,7 +24,7 @@ use ssh_key::rand_core::{OsRng, RngCore};
 use ureq::Agent;
 
 const SCOPE: &str = "monitoring management offline_access";
-/// The library scripts' names (design section 7.1): `posctl-admin init` finds them by name, and a run's
+/// The library scripts' names: `posctl-admin init` finds them by name, and a run's
 /// activities carry it.
 pub const INSTALL_SCRIPT: &str = "Install-PosTunnel";
 pub const INVOKE_SCRIPT: &str = "Invoke-PosTunnel";
@@ -225,9 +225,9 @@ fn snippet(body: &str) -> String {
     body.chars().take(300).collect()
 }
 
-/// What the commands of one identity share, between runs and with each other while they overlap (design
-/// section 8): the access token, since NinjaOne ends the one before at every sign-in, and the NinjaOne
-/// user they run as, which the API never states and a command learns from its own script run.
+/// What the commands of one identity share, between runs and with each other while they overlap: the
+/// access token, since NinjaOne ends the one before at every sign-in, and the NinjaOne user they run
+/// as, which the API never states and a command learns from its own script run.
 pub trait Shared {
     fn access_token(&self) -> Option<String>;
     fn set_access_token(&self, token: &str);
@@ -235,9 +235,9 @@ pub trait Shared {
     fn set_user(&self, user: i64);
 }
 
-/// The sign-in as stored: Windows Credential Manager on Windows (design section 3), files elsewhere and
+/// The sign-in as stored: Windows Credential Manager on Windows, files elsewhere and
 /// wherever `POSCTL_CONFIG_HOME` is set (mode 0600 on Unix), so a second identity has its own sign-in and a
-/// test never reads the real one (design section 8).
+/// test never reads the real one.
 pub mod token_store {
     use anyhow::{Context, Result};
 
@@ -347,7 +347,7 @@ pub struct Device {
     pub organization_id: i64,
     #[serde(default)]
     pub offline: bool,
-    /// A per-device override; absent on every device in the tenant so far (design section 11).
+    /// A per-device override; absent on every device in the tenant so far.
     pub policy_id: Option<i64>,
     pub role_policy_id: Option<i64>,
 }
@@ -374,8 +374,7 @@ pub struct FieldDefinition {
     pub api_permission: Option<String>,
 }
 
-/// A requested script run, followed through the device's activity list (design section 8, script
-/// results).
+/// A requested script run, followed through the device's activity list.
 #[derive(Debug)]
 pub struct ScriptRun {
     pub device: i64,
@@ -386,7 +385,7 @@ pub struct ScriptRun {
     series: Option<String>,
 }
 
-/// The device fields a POS publishes (design section 7.1): `Publish-DeviceFields` reports a line for
+/// The device fields a POS publishes: `Publish-DeviceFields` reports a line for
 /// each, at the end of an install's report and of a rekey's.
 const DEVICE_FIELDS: [&str; 3] = ["posTunnelRelayKey", "posTunnelHostKey", "posTunnelVersion"];
 
@@ -411,7 +410,7 @@ pub struct ScriptResult {
 }
 
 impl ScriptResult {
-    /// A step put off to a later run (a session is open, a restart is pending): design section 7.1.
+    /// A step put off to a later run (a session is open, a restart is pending).
     pub fn deferred(&self) -> bool {
         self.output
             .lines()
@@ -477,7 +476,7 @@ impl Api {
     }
 
     /// One call; the status and body, whatever the status. NinjaOne ends an access token at the next
-    /// sign-in (design section 8), so the token is shared, and a 401 means it ran out or another
+    /// sign-in, so the token is shared, and a 401 means it ran out or another
     /// command signed in: this one takes that command's token, or signs in and shares its own, and
     /// repeats the call. Twice at most, as a third command may sign in in between.
     fn call(&self, method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String)> {
@@ -545,7 +544,7 @@ impl Api {
     }
 
     /// Every device of one organization, a page at a time (`after` is the last device ID of the
-    /// previous page). The tenant-wide list is never asked for (design section 8).
+    /// previous page). The tenant-wide list is never asked for.
     pub fn devices(&self, organization: i64) -> Result<Vec<Device>> {
         let mut devices: Vec<Device> = Vec::new();
         loop {
@@ -618,8 +617,8 @@ impl Api {
     }
 
     /// Waits until NinjaOne shows every field value `result` says its script wrote, up to `deadline`.
-    /// The API shows a POS's field writes well after its run's result (39 s on the test POS, design
-    /// section 11), and `connect` reads a POS's keys and version there. A deadline rather than a
+    /// The API shows a POS's field writes well after its run's result (39 s on the test POS), and
+    /// `connect` reads a POS's keys and version there. A deadline rather than a
     /// timeout, so that the waits for many POSes share one. `result` is an install's or a rekey's:
     /// one that doesn't name every device field was cut short by NinjaOne, and isn't waited on.
     pub fn await_published(

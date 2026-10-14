@@ -33,7 +33,7 @@
 
 [tool.docker]
   # relay/ is a hand-written image: its sshd must run as root, which devkit-container's
-  # drop-to-999 model excludes (docs/design.md, section 6.1).
+  # drop-to-999 model excludes.
   silence_unlisted_services_warning = true
   # Compose services setup-project validates against the standard; the only Docker switch.
   # Empty = no Docker handling. Side services are simply not listed.
@@ -56,7 +56,7 @@
   manifest-path = "cli/Cargo.toml"
 
 [tool.devkit]
-  # Attaches the signed POS package to each release (docs/design.md, section 7.1).
+  # Attaches the signed POS package to each release.
   release-workflow-jobs = ["pos-package"]
 
 [tool.poe]

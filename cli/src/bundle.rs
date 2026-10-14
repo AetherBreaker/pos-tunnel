@@ -1,4 +1,4 @@
-//! The operator bundle (design section 7.9): one line `posctl-admin operator add` prints and
+//! The operator bundle: one line `posctl-admin operator add` prints and
 //! `posctl operator import` reads, base64 of a small TOML document holding the new operator's private
 //! key and the admin's config. It holds a private key, so it travels like a password.
 

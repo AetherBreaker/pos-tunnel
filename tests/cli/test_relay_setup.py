@@ -51,7 +51,7 @@ def free_port() -> int:
 
 
 def openssh(tool: str) -> str:
-  """OpenSSH's `tool`: on Windows the one Windows ships, which posctl runs too (design 8).
+  """OpenSSH's `tool`: on Windows the one Windows ships, which posctl runs too.
 
   Under Git Bash `PATH`'s is MSYS's, and Windows' `ssh` refuses a key file MSYS's `ssh-keygen` made.
   """

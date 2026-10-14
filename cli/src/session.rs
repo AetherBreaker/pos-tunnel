@@ -1,4 +1,4 @@
-//! The session commands (design sections 7.2 to 7.6): `connect`, `keepalive`, `status`, `close` and
+//! The session commands: `connect`, `keepalive`, `status`, `close` and
 //! `rebuild`.
 
 use std::time::{Duration, Instant};
@@ -13,24 +13,24 @@ use crate::ninja::{Api, Device, INVOKE_SCRIPT, ScriptResult};
 use crate::relay::{self, Lease, Relay, Starting};
 use crate::workstation::{self, Session, Workstation};
 
-/// Default and ceiling for the idle timeout; the relay enforces the same ceiling (design section 5).
+/// Default and ceiling for the idle timeout; the relay enforces the same ceiling.
 pub const MAX_IDLE: Duration = Duration::from_secs(12 * 60 * 60);
-/// The first POS package version whose `Open` can add a second operator's key (design section 7.2).
+/// The first POS package version whose `Open` can add a second operator's key.
 const JOIN_VERSION: u64 = 4;
 
 /// How long each wait lasts; tests shorten them.
 pub struct Timing {
     /// Between two looks while waiting.
     pub poll: Duration,
-    /// For `Open`'s result and the tunnel (design section 7.2, step 7).
+    /// For `Open`'s result and the tunnel.
     pub open: Duration,
     /// For a `Touch`, `Close`, `Rekey` or join result.
     pub script: Duration,
     /// For `Install-PosTunnel`: a first install downloads and installs OpenSSH.
     pub install: Duration,
-    /// For the relay to drop a lease that has ended, which it does at its next pass (design section 6.5).
+    /// For the relay to drop a lease that has ended, which it does at its next pass.
     pub released: Duration,
-    /// For NinjaOne to show the fields a script wrote: 39 s on the test POS (design section 11).
+    /// For NinjaOne to show the fields a script wrote: 39 s on the test POS.
     pub published: Duration,
 }
 
@@ -103,7 +103,7 @@ pub fn connect(ctx: &Context, name: &str, idle: Duration) -> Result<Connected> {
     open(ctx, &device, name, idle, false)
 }
 
-/// `connect` from its step 2 (design section 7.2), for a POS already resolved and online: opens a
+/// `connect` from its step 2, for a POS already resolved and online: opens a
 /// session, or joins the one another workstation holds, and leaves a working alias or nothing.
 fn open(
     ctx: &Context,
@@ -130,9 +130,9 @@ fn open(
         );
     };
 
-    // A lease out of time was closed or has expired, and the daemon drops it at its next pass (design
-    // section 6.5). That session has ended: wait for the port rather than join it, as `open` would
-    // refuse and `renew` too.
+    // A lease out of time was closed or has expired, and the daemon drops it at its next pass, within
+    // 5 s. That session has ended: wait for the port rather than join it, as `open` would refuse and
+    // `renew` too.
     let mut deadline = Instant::now() + ctx.timing.released;
     let leases = loop {
         let leases = relay::leases(ctx.relay)?;
@@ -184,7 +184,7 @@ fn open(
     let alias = workstation::alias(name, device.id, &taken);
     let key = keys::generate(&format!("posctl {alias}"))?;
     let public = keys::public_line(key.public_key())?;
-    // Bare base64, so NinjaOne's parameter string needs no quoting (design section 7.2).
+    // Bare base64, so NinjaOne's parameter string needs no quoting.
     let session_key = public.trim_start_matches("ssh-ed25519 ");
     let seconds = idle.as_secs();
     let invoke_script = ctx.ninja.invoke_script_id;
@@ -389,7 +389,7 @@ fn open(
     }
 }
 
-/// Renews the idle timeout on the relay, then on the POS (design section 7.3). The relay lease is the
+/// Renews the idle timeout on the relay, then on the POS. The relay lease is the
 /// one that counts, so a refusal there stops; a POS that doesn't confirm is an error naming what was
 /// renewed.
 pub fn keepalive(ctx: &Context, name: &str) -> Result<Lease> {
@@ -427,7 +427,7 @@ pub struct Row {
     pub lease: Lease,
 }
 
-/// One row per lease on the relay, or the named POS's alone (design section 7.4).
+/// One row per lease on the relay, or the named POS's alone.
 pub fn status(ctx: &Context, name: Option<&str>) -> Result<Vec<Row>> {
     let leases = relay::leases(ctx.relay)?;
     let held = ctx.workstation.reconcile(&leases)?;
@@ -476,7 +476,7 @@ pub fn close(ctx: &Context, name: &str) -> Result<Closed> {
     end(ctx, &device)
 }
 
-/// Ends the session on `device` for every operator on it (design section 7.5): the relay first, which
+/// Ends the session on `device` for every operator on it: the relay first, which
 /// cuts the tunnel whatever the POS does, then the POS, then this workstation's own state. `Close` runs
 /// without a lease too, which cleans up a session left on the POS alone.
 pub(crate) fn end(ctx: &Context, device: &Device) -> Result<Closed> {
@@ -508,7 +508,7 @@ pub(crate) fn end(ctx: &Context, device: &Device) -> Result<Closed> {
     Ok(Closed { had_lease, pos })
 }
 
-/// Break glass (design section 7.6): closes the session and opens a new one, with a new 72h maximum.
+/// Break glass: closes the session and opens a new one, with a new 72h maximum.
 /// The caller has already had the operator confirm.
 pub fn rebuild(ctx: &Context, name: &str) -> Result<Connected> {
     let device = fleet::find_pos(ctx.api, ctx.ninja, name)?;

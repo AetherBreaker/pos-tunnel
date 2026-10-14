@@ -1,4 +1,4 @@
-//! `posctl-admin`: the admin's key generation and fleet configuration (design section 7.9). Runs only
+//! `posctl-admin`: the admin's key generation and fleet configuration. Runs only
 //! with the admin's operator key, so its commands stay out of other operators' and agents' way.
 
 use std::fs;
@@ -144,7 +144,7 @@ fn main() -> Result<()> {
                 })
         };
         // By name, refused when absent: an organization ID that doesn't exist lists no devices instead
-        // of failing (design section 11).
+        // of failing.
         let organization_id = named(
             "organization",
             &api.get::<Vec<Named>>("/v2/organizations")?,

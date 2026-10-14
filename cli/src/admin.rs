@@ -1,4 +1,4 @@
-//! `posctl-admin`'s own files (design section 7.9) and its admin check.
+//! `posctl-admin`'s own files and its admin check.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -21,7 +21,7 @@ pub const ADMIN_KEY: &str = match option_env!("POSCTL_ADMIN_KEY") {
 
 /// Runs only for the admin: keeps these commands out of reach of an agent working through another
 /// operator's `posctl`. Not a security boundary; the admin's NinjaOne sign-in is what can change the
-/// fleet (design section 7.9).
+/// fleet.
 pub fn require_admin(operator_key: &Path) -> Result<()> {
     if keys::public_of_file(operator_key)? != keys::parse_public(ADMIN_KEY)? {
         bail!(
@@ -55,7 +55,7 @@ pub const GITHUB_RAW: &str = "https://raw.githubusercontent.com/AetherBreaker/po
 /// The signing public key in `ALLOWED_SIGNERS` at the release tag `tag`, fetched from the repository on
 /// GitHub (`raw` is `GITHUB_RAW` outside tests). No checkout or local repository is read: a branch, a
 /// stale tree or an uncommitted edit can't become what the fleet trusts. Under `refs/tags/` GitHub
-/// answers 404 for a branch, a commit or a missing tag (design section 7.9).
+/// answers 404 for a branch, a commit or a missing tag.
 pub fn signer_at_tag(raw: &str, tag: &str) -> Result<String> {
     // The tag goes into a URL path; nothing that could leave `refs/tags/` is sent.
     if !tag.starts_with(|c: char| c.is_ascii_alphanumeric())
@@ -98,7 +98,7 @@ pub fn signer_at_tag(raw: &str, tag: &str) -> Result<String> {
     keys::parse_public(&key)
 }
 
-/// The relay's `RELAY_SSH_PRIVATE_KEY` line: base64 of the OpenSSH private key file (design section 6.1).
+/// The relay's `RELAY_SSH_PRIVATE_KEY` line: base64 of the OpenSSH private key file.
 pub fn relay_env_line(private_key_text: &str) -> String {
     format!(
         "RELAY_SSH_PRIVATE_KEY={}",
@@ -107,7 +107,7 @@ pub fn relay_env_line(private_key_text: &str) -> String {
 }
 
 /// The operators the relay lets in, the admin included: `operators.toml`, name to public key. Only
-/// public keys are kept here (design section 7.9).
+/// public keys are kept here.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Operators {
     pub operators: BTreeMap<String, String>,
@@ -156,7 +156,7 @@ impl Operators {
         }
     }
 
-    /// The relay's `OPERATOR_KEYS` line: `<name>=<ed25519 base64>`, comma-separated (design section 6.1).
+    /// The relay's `OPERATOR_KEYS` line: `<name>=<ed25519 base64>`, comma-separated.
     pub fn env_line(&self) -> String {
         let entries: Vec<String> = self
             .operators
