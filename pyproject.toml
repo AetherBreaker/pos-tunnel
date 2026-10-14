@@ -1,6 +1,6 @@
 [project]
   name            = "pos-tunnel"
-  version         = "1.1.0"
+  version         = "1.1.1"
   description     = "On-demand SSH access to NinjaOne-managed Windows POS machines through a hardened relay"
   readme          = "README.md"
   requires-python = ">=3.14"
