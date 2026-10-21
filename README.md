@@ -219,7 +219,9 @@ For a Windows machine NinjaOne doesn't manage:
   the session's key authorized. Its key files, in `%LOCALAPPDATA%\posctl\serve`, go when it stops on
   Ctrl+C, else (a closed window, a crash) at its next start. One `serve` per account at a time.
 - The session's port is 65000–65535, its name the machine's hostname, its login the console's
-  account. The default shell is cmd: run `powershell -Command ...`.
+  account. Run as SYSTEM (a RustDesk terminal), which can't log in over SSH, it logs in as the
+  enabled local administrator with the lowest RID, the built-in Administrator aside, and says which.
+  The default shell is cmd: run `powershell -Command ...`.
 - The relay ends an ad hoc lease (`open ... --adhoc`) once its tunnel drops, so a session never
   outlives its console.
 - Only the workstation that connected knows the name; elsewhere `status` shows `device 45xxx`.

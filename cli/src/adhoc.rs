@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use ssh_key::rand_core::{OsRng, RngCore};
@@ -147,18 +147,25 @@ pub fn is_adhoc(device_id: i64) -> bool {
 // ---- The device: `posctl serve` ----
 
 pub fn serve(relay: &config::Relay) -> Result<()> {
-    // The High (elevated) or System integrity level's SID, present only in such a token's groups.
-    let elevated = !cfg!(windows)
-        || Command::new("whoami")
-            .arg("/groups")
-            .output()
-            .is_ok_and(|out| {
-                let groups = String::from_utf8_lossy(&out.stdout);
-                groups.contains("S-1-16-12288") || groups.contains("S-1-16-16384")
-            });
-    if !elevated {
+    let groups = Command::new("whoami")
+        .arg("/groups")
+        .output()
+        .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+        .unwrap_or_default();
+    // The System and High (elevated) integrity levels' SIDs: only in such a token's groups.
+    let system = groups.contains("S-1-16-16384");
+    if cfg!(windows) && !system && !groups.contains("S-1-16-12288") {
         bail!("posctl serve needs an elevated console: open one with Run as administrator");
     }
+    let user = if system {
+        let admin = first_admin()?;
+        println!("Running as SYSTEM: the session logs in as {admin}.");
+        admin
+    } else {
+        std::env::var("USERNAME")
+            .or_else(|_| std::env::var("USER"))
+            .context("no USERNAME")?
+    };
     let sshd = find_sshd()?;
     let base = dirs::data_local_dir()
         .context("this account has no local app data folder")?
@@ -175,7 +182,7 @@ pub fn serve(relay: &config::Relay) -> Result<()> {
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     ctrlc::set_handler(|| STOP.store(true, Ordering::SeqCst))?;
-    let result = run(relay, &sshd, &dir);
+    let result = run(relay, &sshd, &dir, user);
     let _ = fs::remove_dir_all(&dir);
     result
 }
@@ -275,13 +282,36 @@ fn install_openssh() -> Result<()> {
     Ok(())
 }
 
-fn run(relay: &config::Relay, sshd: &Path, dir: &Path) -> Result<()> {
+/// The account a SYSTEM `serve` logs in as. SYSTEM itself can't log in over SSH, but an sshd running
+/// as SYSTEM logs in any local account, as its service does: the enabled local administrator with
+/// the lowest RID, the built-in one (RID 500) aside.
+fn first_admin() -> Result<String> {
+    let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
+        $g = Get-CimInstance Win32_Group -Filter \"LocalAccount=True AND SID='S-1-5-32-544'\"; \
+        Get-CimAssociatedInstance -InputObject $g -ResultClassName Win32_UserAccount | \
+        Where-Object { $_.LocalAccount -and -not $_.Disabled -and $_.SID -notlike '*-500' } | \
+        Sort-Object { [long]($_.SID -split '-')[-1] } | Select-Object -First 1 -ExpandProperty Name";
+    // -EncodedCommand, UTF-16LE base64: no quoting to survive.
+    let encoded: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        .arg(STANDARD.encode(encoded))
+        .output()
+        .context("running PowerShell to find a local administrator account")?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if name.is_empty() {
+        bail!(
+            "posctl serve is running as SYSTEM, which can't log in over SSH, and no enabled local administrator account besides the built-in one was found to log in as instead. {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(name)
+}
+
+fn run(relay: &config::Relay, sshd: &Path, dir: &Path, user: String) -> Result<()> {
     let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "device".to_owned());
-    let user = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .context("no USERNAME")?;
     let relay_key = keys::generate(&format!("posctl serve {host} relay"))?;
     let server_key = keys::generate(&format!("posctl serve {host} server"))?;
     let session_key = keys::generate(&format!("posctl serve {host} session"))?;
@@ -626,6 +656,16 @@ mod tests {
         assert!(refused(|l| l.relay_key = "ssh-ed25519 AAAA x".into()));
         assert!(refused(|l| l.session_key = "nope".into()));
         assert!(Line::decode("posctl-adhoc:!!!").is_err());
+    }
+
+    /// Reads this machine's accounts: run by hand, `cargo test -- --ignored first_admin`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn first_admin_finds_a_local_administrator() {
+        let name = first_admin().unwrap();
+        assert!(!name.is_empty() && !name.contains('\n'), "{name:?}");
+        println!("{name}");
     }
 
     #[test]
