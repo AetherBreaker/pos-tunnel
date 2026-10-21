@@ -39,7 +39,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             manylinux: "2_17"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -48,7 +48,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - uses: astral-sh/setup-uv@v5
+      # setup-uv stopped publishing major tags at v8, so it is pinned to an exact release.
+      - uses: astral-sh/setup-uv@v10.3.0
 
       - name: The tag must name the committed version
         shell: bash
@@ -63,7 +64,7 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           args: --release --strip --out dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: dist/*.whl
@@ -73,19 +74,19 @@ jobs:
     name: "Build: sdist"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.0
 
       - name: Build the sdist
         run: uv build --sdist --out-dir dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -98,14 +99,14 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.0
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -148,12 +149,12 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10.3.0
 
       - name: The committed manifest must match the files and carry a valid signature
         run: uv run --no-project scripts/sign_pos.py --check
