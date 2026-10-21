@@ -215,13 +215,20 @@ For a Windows machine NinjaOne doesn't manage:
 
 - `serve` uses `C:\Program Files\OpenSSH` or Windows' own OpenSSH Server. With neither, it installs
   the Win32-OpenSSH MSI `Setup.ps1` pins (SHA256 checked) and leaves its `sshd` service stopped and
-  disabled. Its own `sshd` runs in the console as the console's account, on loopback only, with only
-  the session's key authorized. Its key files, in `%LOCALAPPDATA%\posctl\serve`, go when it stops on
-  Ctrl+C, else (a closed window, a crash) at its next start. One `serve` per account at a time.
+  Manual. Its own `sshd` runs in the console as the console's account, on loopback only, with only
+  the session's key authorized. Its key files live in `%LOCALAPPDATA%\posctl\serve`. One `serve` per
+  account at a time.
+- Run as SYSTEM (a RustDesk terminal), `serve` runs that `sshd` as the `sshd` service instead, its
+  `ImagePath` pointed at this run's config and log (echoed to the console): sshd's per-connection
+  processes run as `NT SERVICE\sshd` and can't open a SYSTEM console's desktop. SYSTEM can't log in
+  over SSH, so the login is the enabled local administrator with the lowest RID, the built-in
+  Administrator aside; `serve` says which.
+- Once `serve` ends, however it does (closing a RustDesk terminal kills it outright), a detached
+  `posctl serve-watch` stops the service, restores its `ImagePath` and deletes the key files; the next
+  `serve` does it too, if needed. RustDesk's terminal persistence option keeps a closed terminal, and
+  so the session, running: end it with `posctl close <hostname>`.
 - The session's port is 65000–65535, its name the machine's hostname, its login the console's
-  account. Run as SYSTEM (a RustDesk terminal), which can't log in over SSH, it logs in as the
-  enabled local administrator with the lowest RID, the built-in Administrator aside, and says which.
-  The default shell is cmd: run `powershell -Command ...`.
+  account. The default shell is cmd: run `powershell -Command ...`.
 - The relay ends an ad hoc lease (`open ... --adhoc`) once its tunnel drops, so a session never
   outlives its console.
 - Only the workstation that connected knows the name; elsewhere `status` shows `device 45xxx`.

@@ -87,6 +87,9 @@ enum Command {
         #[arg(long, num_args = 2..=3, value_names = ["ADDRESS", "PUBLIC_KEY"])]
         relay: Option<Vec<String>>,
     },
+    /// `posctl serve`'s cleanup once it has ended, however it did; `serve` starts it.
+    #[command(hide = true)]
+    ServeWatch,
     /// Set up this workstation from the bundle the admin sent you.
     #[command(subcommand)]
     Operator(OperatorCommand),
@@ -172,6 +175,7 @@ fn main() -> Result<()> {
             };
             adhoc::serve(&relay)?;
         }
+        Command::ServeWatch => adhoc::watch()?,
         Command::Login => {
             let config = Config::load()?;
             ninja::login(&config.ninjaone.base_url, &config.ninjaone.client_id)?;

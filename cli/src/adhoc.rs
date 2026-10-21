@@ -178,13 +178,124 @@ pub fn serve(relay: &config::Relay) -> Result<()> {
         bail!("posctl serve is already running for this account, in another console");
     }
     let dir = base.join("serve");
-    // Leftovers of a run whose window was closed or crashed: the keys of a session that has ended.
+    // Leftovers of a run the watcher didn't clean up after: the sshd service still pointed at its
+    // config, and the keys of a session that has ended.
+    if system && powershell(RESTORE_SERVICE)?.trim() == "busy" {
+        bail!(
+            "the sshd service is running on this machine, and posctl serve as SYSTEM needs it: stop it (Stop-Service sshd), or run posctl serve from an elevated console on the desktop"
+        );
+    }
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    // Held, never written, until this process ends: see `watch`.
+    let _watcher = {
+        let mut watcher = Command::new(std::env::current_exe()?);
+        watcher
+            .arg("serve-watch")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: off this console, so closing it (which ends
+        // every process attached to it) doesn't end the watcher.
+        #[cfg(windows)]
+        std::os::windows::process::CommandExt::creation_flags(&mut watcher, 0x8 | 0x200);
+        watcher.spawn().ok()
+    };
     ctrlc::set_handler(|| STOP.store(true, Ordering::SeqCst))?;
-    let result = run(relay, &sshd, &dir, user);
+    let result = run(relay, &sshd, &dir, user, system);
+    if system {
+        let _ = powershell(RESTORE_SERVICE);
+    }
     let _ = fs::remove_dir_all(&dir);
     result
+}
+
+/// Puts the `sshd` service back if a SYSTEM `serve` pointed it at its config: stopped, `ImagePath`
+/// the bare sshd.exe again. Prints `busy` if the service is running for something else.
+const RESTORE_SERVICE: &str = r#"
+$k = 'HKLM:\SYSTEM\CurrentControlSet\Services\sshd'
+$i = (Get-ItemProperty -LiteralPath $k -Name ImagePath -ErrorAction SilentlyContinue).ImagePath
+if ($i -like '*\posctl\serve\*') {
+    Stop-Service sshd -Force -ErrorAction SilentlyContinue
+    Set-ItemProperty -LiteralPath $k -Name ImagePath -Value ($i -replace '^("[^"]+").*', '$1')
+} elseif ((Get-Service sshd -ErrorAction SilentlyContinue).Status -eq 'Running') { 'busy' }
+"#;
+
+/// `posctl serve-watch`, which `serve` starts detached with a pipe on its stdin. The pipe reaches EOF
+/// once `serve` has ended, however it did: closing a RustDesk terminal ends `serve` with no chance
+/// to clean up, and as SYSTEM it leaves the sshd service running. Does what `serve`'s own exit does,
+/// unless another `serve` has started since (it holds the lock).
+pub fn watch() -> Result<()> {
+    let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+    let base = dirs::data_local_dir()
+        .context("this account has no local app data folder")?
+        .join("posctl");
+    let lock = fs::File::create(base.join("serve.lock"))?;
+    if lock.try_lock().is_err() {
+        return Ok(());
+    }
+    let _ = powershell(RESTORE_SERVICE);
+    let _ = fs::remove_dir_all(base.join("serve"));
+    Ok(())
+}
+
+/// A Windows PowerShell script's standard output, or its error. `-EncodedCommand` (UTF-16LE base64),
+/// so no quoting has to survive.
+fn powershell(script: &str) -> Result<String> {
+    let script = format!("[Console]::OutputEncoding = [Text.Encoding]::UTF8\n{script}");
+    let encoded: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let out = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
+        .arg(STANDARD.encode(encoded))
+        .output()
+        .context("running PowerShell")?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The SSH server `run` started: its own child, or as SYSTEM the `sshd` service. A SYSTEM console
+/// (a RustDesk terminal) can't start sshd's per-connection processes: they run as `NT SERVICE\sshd`
+/// and can't open that console's desktop (exit 0xC0000142). The service's desktop they can.
+enum Server {
+    Child(Child),
+    Service {
+        log: PathBuf,
+        shown: usize,
+        checked: Instant,
+    },
+}
+
+impl Server {
+    /// Why sshd has stopped, if it has. The service's log is echoed here first: as a service, its
+    /// output reaches no console.
+    fn stopped(&mut self) -> Result<Option<String>> {
+        match self {
+            Server::Child(child) => Ok(child
+                .try_wait()?
+                .map(|status| format!("sshd exited ({status})"))),
+            Server::Service {
+                log,
+                shown,
+                checked,
+            } => {
+                if let Ok(text) = fs::read(&*log)
+                    && text.len() > *shown
+                {
+                    print!("{}", String::from_utf8_lossy(&text[*shown..]));
+                    *shown = text.len();
+                }
+                if checked.elapsed() < Duration::from_secs(5) {
+                    return Ok(None);
+                }
+                *checked = Instant::now();
+                let out = Command::new("sc.exe").args(["query", "sshd"]).output()?;
+                Ok((!String::from_utf8_lossy(&out.stdout).contains("RUNNING"))
+                    .then(|| "the sshd service stopped".to_owned()))
+            }
+        }
+    }
 }
 
 fn find_sshd() -> Result<PathBuf> {
@@ -325,9 +436,9 @@ fn install_openssh() -> Result<()> {
     if !matches!(status.code(), Some(0 | 3010)) {
         bail!("installing OpenSSH failed: msiexec exited {status}");
     }
-    // Not a service: `serve` runs sshd in its own console. Disabled first, so nothing restarts it.
+    // Manual, as on the POSes: started only by a SYSTEM `serve`, for its session (`Server`).
     let _ = Command::new("sc.exe")
-        .args(["config", "sshd", "start=", "disabled"])
+        .args(["config", "sshd", "start=", "demand"])
         .output();
     let _ = Command::new("sc.exe").args(["stop", "sshd"]).output();
     Ok(())
@@ -337,29 +448,24 @@ fn install_openssh() -> Result<()> {
 /// as SYSTEM logs in any local account, as its service does: the enabled local administrator with
 /// the lowest RID, the built-in one (RID 500) aside.
 fn first_admin() -> Result<String> {
-    let script = "[Console]::OutputEncoding = [Text.Encoding]::UTF8; \
-        $g = Get-CimInstance Win32_Group -Filter \"LocalAccount=True AND SID='S-1-5-32-544'\"; \
-        Get-CimAssociatedInstance -InputObject $g -ResultClassName Win32_UserAccount | \
-        Where-Object { $_.LocalAccount -and -not $_.Disabled -and $_.SID -notlike '*-500' } | \
-        Sort-Object { [long]($_.SID -split '-')[-1] } | Select-Object -First 1 -ExpandProperty Name";
-    // -EncodedCommand, UTF-16LE base64: no quoting to survive.
-    let encoded: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
-    let out = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-EncodedCommand"])
-        .arg(STANDARD.encode(encoded))
-        .output()
-        .context("running PowerShell to find a local administrator account")?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    let name = powershell(
+        "$g = Get-CimInstance Win32_Group -Filter \"LocalAccount=True AND SID='S-1-5-32-544'\"
+        Get-CimAssociatedInstance -InputObject $g -ResultClassName Win32_UserAccount |
+            Where-Object { $_.LocalAccount -and -not $_.Disabled -and $_.SID -notlike '*-500' } |
+            Sort-Object { [long]($_.SID -split '-')[-1] } | Select-Object -First 1 -ExpandProperty Name",
+    )
+    .context("finding a local administrator account")?
+    .trim()
+    .to_owned();
     if name.is_empty() {
         bail!(
-            "posctl serve is running as SYSTEM, which can't log in over SSH, and no enabled local administrator account besides the built-in one was found to log in as instead. {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "posctl serve is running as SYSTEM, which can't log in over SSH, and no enabled local administrator account besides the built-in one was found to log in as instead"
         );
     }
     Ok(name)
 }
 
-fn run(relay: &config::Relay, sshd: &Path, dir: &Path, user: String) -> Result<()> {
+fn run(relay: &config::Relay, sshd: &Path, dir: &Path, user: String, system: bool) -> Result<()> {
     let host = std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .unwrap_or_else(|_| "device".to_owned());
@@ -409,25 +515,57 @@ fn run(relay: &config::Relay, sshd: &Path, dir: &Path, user: String) -> Result<(
     }
     .encode()?;
 
-    let sshd_path = sshd;
-    // -D: never detach (upstream sshd does without it). Not -d, which serves one connection only.
-    let mut sshd = Command::new(sshd_path)
-        .arg("-D")
-        .arg("-f")
-        .arg(dir.join("sshd_config"))
-        .arg("-e")
-        .stdin(Stdio::null())
-        .spawn()
-        .with_context(|| format!("starting {}", sshd_path.display()))?;
+    let mut server = if system {
+        // The service runs `ImagePath` as its command line: this run's config and log, until
+        // RESTORE_SERVICE puts it back.
+        let log = dir.join("sshd.log");
+        let image = format!(
+            "\"{}\" -f \"{}\" -E \"{}\"",
+            sshd.display(),
+            dir.join("sshd_config").display(),
+            log.display()
+        );
+        powershell(&format!(
+            "$ErrorActionPreference = 'Stop'
+            Set-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\sshd' -Name ImagePath -Value '{}'
+            Set-Service sshd -StartupType Manual
+            Start-Service sshd",
+            image.replace('\'', "''")
+        ))
+        .context("starting the sshd service")?;
+        println!(
+            "sshd runs as the sshd service for this session: a SYSTEM console can't start its per-connection processes."
+        );
+        Server::Service {
+            log,
+            shown: 0,
+            checked: Instant::now(),
+        }
+    } else {
+        // -D: never detach (upstream sshd does without it). Not -d, which serves one connection only.
+        Server::Child(
+            Command::new(sshd)
+                .arg("-D")
+                .arg("-f")
+                .arg(dir.join("sshd_config"))
+                .arg("-e")
+                .stdin(Stdio::null())
+                .spawn()
+                .with_context(|| format!("starting {}", sshd.display()))?,
+        )
+    };
     println!(
         "\nOn your workstation, run (the line is a secret: it logs in to {host}):\n\n  posctl connect {line}\n\n\
          Waiting for it; Ctrl+C or closing this window ends the session.\n"
     );
     // The client of the same OpenSSH.
-    let ssh = sshd_path.with_file_name("ssh.exe");
-    let result = tunnel(relay, dir, port, local, &mut sshd, &ssh);
-    let _ = sshd.kill();
-    let _ = sshd.wait();
+    let ssh = sshd.with_file_name("ssh.exe");
+    let result = tunnel(relay, dir, port, local, &mut server, &ssh);
+    // The service `serve` stops once this returns (RESTORE_SERVICE).
+    if let Server::Child(child) = &mut server {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
     result
 }
 
@@ -439,7 +577,7 @@ fn tunnel(
     dir: &Path,
     port: u16,
     local: u16,
-    sshd: &mut Child,
+    server: &mut Server,
     ssh: &Path,
 ) -> Result<()> {
     let known_hosts = dir.join("known_hosts").to_string_lossy().replace('\\', "/");
@@ -482,7 +620,7 @@ fn tunnel(
             .spawn()
             .with_context(|| format!("starting {}", ssh.display()))?;
         loop {
-            if let Some(status) = sshd.try_wait()? {
+            if let Some(why) = server.stopped()? {
                 let _ = child.kill();
                 // Ctrl+C reaches sshd too, and may end it before the handler has set STOP.
                 std::thread::sleep(Duration::from_millis(500));
@@ -490,7 +628,7 @@ fn tunnel(
                     println!("Stopped: the session has ended.");
                     return Ok(());
                 }
-                bail!("sshd exited ({status}): see its output above");
+                bail!("{why}: see its output above");
             }
             if STOP.load(Ordering::SeqCst) {
                 let _ = child.kill();
