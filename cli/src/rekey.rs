@@ -446,6 +446,7 @@ mod tests {
             alias: "pos-002".into(),
             host_key: pos.host_key.clone(),
             started: "long ago".into(),
+            user: None,
         };
         ws.save(&session, &crate::keys::generate("stale").unwrap())
             .unwrap();

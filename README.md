@@ -24,6 +24,7 @@ operator workstation                    relay (VPS container)                 PO
 - [Setting it up](#setting-it-up)
 - [Adding an operator](#adding-an-operator)
 - [Sessions in detail](#sessions-in-detail)
+- [Ad hoc sessions](#ad-hoc-sessions)
 - [What lives where](#what-lives-where)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
@@ -99,6 +100,8 @@ posctl close "Store 42 Register 1"
 | Command | What it does |
 | --- | --- |
 | `posctl connect <name> [--idle-timeout <dur>]` | Opens a session, or joins the one another operator has open on that POS, and prints the `ssh` alias. `--idle-timeout` shortens the 12h idle timeout of a session this opens (whole seconds, `1s` to `12h`). Usually under half a minute; up to six (a slow POS, a POS's first session). |
+| `posctl connect <line>` | Connects the [ad hoc session](#ad-hoc-sessions) whose line `posctl serve` printed, and prints the `ssh` alias. No NinjaOne. |
+| `posctl serve [--relay <host>[:<port>] <public key>]` | On a machine NinjaOne doesn't manage, in an elevated console: runs a one-shot `sshd` there, reachable through the relay, and prints the line for `connect`. Ctrl+C or closing the console ends it. |
 | `posctl keepalive <name>` | Restarts the idle timeout on the relay and on the POS. |
 | `posctl status [<name>]` | Open sessions: the alias where this workstation holds the session, who opened it, the time left, and whether the tunnel is up. |
 | `posctl close <name>` | Ends the session for everyone on it, on the relay first, then on the POS. |
@@ -200,6 +203,28 @@ operator off (redeploy the relay with the line it prints).
   device's activity list, told apart from another operator's by the requesting user. NinjaOne shows a
   field a script wrote about 40 s after the run's result, so `rekey` and `update` wait for it before
   reporting success.
+
+## Ad hoc sessions
+
+For a Windows machine NinjaOne doesn't manage:
+
+1. On it, in an elevated console, run `posctl serve` (install posctl there with uv, or copy `posctl.exe`).
+2. Move the line it prints to the workstation by a remote desktop's clipboard, never chat: it holds
+   the session's private key. Run `posctl connect <line>`; it prints the alias.
+3. `posctl close <hostname>` here, or Ctrl+C or closing the console there, ends the session.
+
+- `serve` uses `C:\Program Files\OpenSSH` or Windows' own OpenSSH Server. With neither, it installs
+  the Win32-OpenSSH MSI `Setup.ps1` pins (SHA256 checked) and leaves its `sshd` service stopped and
+  disabled. Its own `sshd` runs in the console as the console's account, on loopback only, with only
+  the session's key authorized. Its key files, in `%LOCALAPPDATA%\posctl\serve`, go when it stops on
+  Ctrl+C, else (a closed window, a crash) at its next start. One `serve` per account at a time.
+- The session's port is 65000–65535, its name the machine's hostname, its login the console's
+  account. The default shell is cmd: run `powershell -Command ...`.
+- The relay ends an ad hoc lease (`open ... --adhoc`) once its tunnel drops, so a session never
+  outlives its console.
+- Only the workstation that connected knows the name; elsewhere `status` shows `device 45xxx`.
+- The relay is built into posctl (`cli/relay.pub`). After the relay moves or gets a new key pair,
+  update that file and release, or pass `posctl serve --relay <host>[:<port>] <public key>`.
 
 ## What lives where
 

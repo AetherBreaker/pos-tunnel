@@ -13,7 +13,7 @@ use posctl::rekey::{self, Outcome};
 use posctl::relay::SshRelay;
 use posctl::session::{self, Context, How, MAX_IDLE, PosSide, Timing, span};
 use posctl::workstation::Workstation;
-use posctl::{completion, fleet, keys, ninja};
+use posctl::{adhoc, completion, fleet, keys, ninja};
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -27,7 +27,7 @@ enum Command {
     /// Sign in to NinjaOne in the browser; the sign-in is kept in the OS keyring.
     Login,
     /// Open a session to a POS, identified by its exact (case-sensitive) NinjaOne display name, or
-    /// join the one another operator has open on it.
+    /// join the one another operator has open on it. Or connect the line `posctl serve` printed.
     Connect {
         #[arg(add = ArgValueCandidates::new(completion::pos_names))]
         name: String,
@@ -78,6 +78,14 @@ enum Command {
         /// Skip --all's confirmation prompt. Required when stdin is not a terminal.
         #[arg(long)]
         yes: bool,
+    },
+    /// On a machine NinjaOne doesn't manage: run a one-shot SSH server in this console, reachable
+    /// through the relay, and print the line for `posctl connect`. Needs an elevated console; Ctrl+C
+    /// or closing the window ends it.
+    Serve {
+        /// Another relay than the one built in: `<host>[:<port>] ssh-ed25519 <base64>`.
+        #[arg(long, num_args = 2..=3, value_names = ["ADDRESS", "PUBLIC_KEY"])]
+        relay: Option<Vec<String>>,
     },
     /// Set up this workstation from the bundle the admin sent you.
     #[command(subcommand)]
@@ -156,6 +164,14 @@ fn main() -> Result<()> {
             print!("{}", completion::POWERSHELL)
         }
         Command::Completions(CompletionsCommand::Bash) => print!("{}", completion::BASH),
+        // The one command for a machine with no posctl config.
+        Command::Serve { relay } => {
+            let relay = match relay {
+                Some(words) => adhoc::parse_relay(&words.join(" "))?,
+                None => adhoc::built_in_relay()?,
+            };
+            adhoc::serve(&relay)?;
+        }
         Command::Login => {
             let config = Config::load()?;
             ninja::login(&config.ninjaone.base_url, &config.ninjaone.client_id)?;
@@ -246,19 +262,11 @@ fn main() -> Result<()> {
             let ninja = &config.ninjaone;
             let workstation = Workstation::new(&config)?;
             workstation.check_operator_key()?;
-            let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
             // The relay's entry, which `tunnelctl` is reached through.
             workstation.write_ssh_files()?;
             let relay = SshRelay {
                 ssh: workstation.ssh.clone(),
                 config: workstation.config_file(),
-            };
-            let ctx = Context {
-                api: &api,
-                ninja,
-                relay: &relay,
-                workstation: &workstation,
-                timing: Timing::default(),
             };
             let deadlines = |lease: &posctl::relay::Lease| {
                 format!(
@@ -266,6 +274,43 @@ fn main() -> Result<()> {
                     span(lease.idle_remaining),
                     span(lease.absolute_remaining)
                 )
+            };
+            // Ad hoc sessions: the relay alone, no NinjaOne.
+            if let Command::Connect { name, idle_timeout } = &command
+                && adhoc::Line::is_line(name)
+            {
+                let line = adhoc::Line::decode(name)?;
+                let idle = idle_timeout.unwrap_or(MAX_IDLE);
+                let (alias, lease) =
+                    adhoc::connect(&workstation, &relay, &line, idle, &Timing::default())?;
+                println!("{} is connected: ssh {alias}", line.host);
+                println!("{}", deadlines(&lease));
+                return Ok(());
+            }
+            if let Command::Close { name } | Command::Keepalive { name } = &command
+                && let Some(session) = adhoc::held(&workstation, name)?
+            {
+                if matches!(command, Command::Close { .. }) {
+                    if adhoc::close(&workstation, &relay, &session)? {
+                        println!(
+                            "The relay lease for {name} is closed: its tunnel is cut, which ends `posctl serve` there."
+                        );
+                    } else {
+                        println!("The relay holds no session for {name}.");
+                    }
+                } else {
+                    let lease = adhoc::keepalive(&workstation, &relay, &session)?;
+                    println!("{name} is renewed. {}", deadlines(&lease));
+                }
+                return Ok(());
+            }
+            let api = Api::connect(&ninja.base_url, &ninja.client_id)?;
+            let ctx = Context {
+                api: &api,
+                ninja,
+                relay: &relay,
+                workstation: &workstation,
+                timing: Timing::default(),
             };
             match command {
                 Command::Connect { name, idle_timeout } => {

@@ -16,7 +16,7 @@ use crate::config::{Config, config_home, write_private};
 use crate::fleet;
 use crate::ninja::Api;
 use crate::relay::{self, Relay, SshRelay};
-use crate::workstation::Workstation;
+use crate::workstation::{Session, Workstation};
 
 /// What `posctl completions powershell` prints. The aliases put `posctl` ahead of `posctl-admin.exe`
 /// when Tab completes the command itself.
@@ -126,7 +126,8 @@ pub fn open_session_names() -> Vec<CompletionCandidate> {
             ssh: workstation.ssh.clone(),
             config: workstation.config_file(),
         };
-        Ok(open_names(&relay, &names_path()?, refresh))
+        let held = workstation.held().unwrap_or_default();
+        Ok(open_names(&relay, &names_path()?, &held, refresh))
     };
     ask()
         .unwrap_or_default()
@@ -326,19 +327,36 @@ fn cached_poses(
 }
 
 /// The names of the POSes the relay holds a lease for, whoever opened it; none when it can't be asked.
-fn open_names(relay: &dyn Relay, path: &Path, refresh: impl FnOnce() -> Result<()>) -> Vec<String> {
+fn open_names(
+    relay: &dyn Relay,
+    path: &Path,
+    held: &[Session],
+    refresh: impl FnOnce() -> Result<()>,
+) -> Vec<String> {
     let Ok(leases) = relay::leases(relay) else {
         return Vec::new();
     };
-    let open: Vec<i64> = leases.iter().map(|lease| lease.device_id).collect();
-    if open.is_empty() {
-        return Vec::new();
-    }
-    cached_poses(path, &open, refresh)
-        .into_iter()
-        .filter(|(id, _)| open.contains(id))
-        .map(|(_, name)| name)
-        .collect()
+    // Ad hoc sessions are named by this workstation's state alone: NinjaOne never knows them, so they
+    // mustn't make the cache look out of date.
+    let (adhoc, open): (Vec<i64>, Vec<i64>) = leases
+        .iter()
+        .map(|lease| lease.device_id)
+        .partition(|id| crate::adhoc::is_adhoc(*id));
+    let mut names: Vec<String> = if open.is_empty() {
+        Vec::new()
+    } else {
+        cached_poses(path, &open, refresh)
+            .into_iter()
+            .filter(|(id, _)| open.contains(id))
+            .map(|(_, name)| name)
+            .collect()
+    };
+    names.extend(
+        held.iter()
+            .filter(|session| adhoc.contains(&session.device_id))
+            .map(|session| session.name.clone()),
+    );
+    names
 }
 
 /// Appends `line` to `path` on a line of its own, in the file's line endings, unless one of its lines
@@ -607,7 +625,7 @@ mod tests {
         let relay = FakeRelay::new("admin");
         relay.open_as("bob", 1);
         relay.open_as("admin", 3);
-        let names = open_names(&relay, &path, || panic!("refreshed a fresh cache"));
+        let names = open_names(&relay, &path, &[], || panic!("refreshed a fresh cache"));
         assert_eq!(names, ["Bob's POS", "POS 000 Test"]);
     }
 
@@ -615,7 +633,7 @@ mod tests {
     fn close_asks_ninjaone_nothing_while_the_relay_holds_no_lease() {
         let path = dir("no-lease").join("pos_names");
         let relay = FakeRelay::new("admin");
-        assert!(open_names(&relay, &path, || panic!("refreshed for no lease")).is_empty());
+        assert!(open_names(&relay, &path, &[], || panic!("refreshed for no lease")).is_empty());
     }
 
     #[test]
@@ -625,7 +643,7 @@ mod tests {
         let relay = FakeRelay::new("admin");
         relay.open_as("bob", 1);
         relay.unreachable_at.set(Some(1));
-        assert!(open_names(&relay, &path, || Ok(())).is_empty());
+        assert!(open_names(&relay, &path, &[], || Ok(())).is_empty());
     }
 
     #[test]

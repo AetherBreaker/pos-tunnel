@@ -332,6 +332,7 @@ fn open(
                 alias: alias.clone(),
                 host_key: host_key.clone(),
                 started: lease.started.clone(),
+                user: None,
             },
             &key,
         )?;
@@ -441,8 +442,14 @@ pub fn status(ctx: &Context, name: Option<&str>) -> Result<Vec<Row>> {
             return None;
         }
         Some(Row {
+            // An ad hoc session's name only the workstation that connected it knows.
             name: device
                 .and_then(|device| device.display_name.clone())
+                .or_else(|| {
+                    held.iter()
+                        .find(|session| session.device_id == lease.device_id)
+                        .map(|session| session.name.clone())
+                })
                 .unwrap_or_else(|| format!("device {}", lease.device_id)),
             alias: held
                 .iter()
@@ -1261,6 +1268,7 @@ mod tests {
             alias: "pos-002".into(),
             host_key: pos.host_key.clone(),
             started: "long ago".into(),
+            user: None,
         };
         ws.save(&session, &keys::generate("stale").unwrap())
             .unwrap();

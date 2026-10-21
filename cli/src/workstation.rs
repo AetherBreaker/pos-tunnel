@@ -28,6 +28,9 @@ pub struct Session {
     /// The lease's `started` when this workstation connected: the same value on the relay is the same
     /// session.
     pub started: String,
+    /// The login account: `support` on a POS, the device's own for an ad hoc session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<String>,
 }
 
 pub struct Workstation {
@@ -279,12 +282,13 @@ impl Workstation {
             // ProxyCommand, not ProxyJump: Windows' client hands its own -F to the jump unquoted, and
             // naming the client keeps the hop in it (and its agent) when Git Bash's ssh runs the alias.
             config.push_str(&format!(
-                "\nHost {}\n  HostName localhost\n  Port {}\n  User support\n  \
+                "\nHost {}\n  HostName localhost\n  Port {}\n  User \"{}\"\n  \
                  ProxyCommand {} -F {} -W \"[%h]:%p\" posctl-relay\n  IdentityFile {}\n  IdentitiesOnly yes\n  \
                  HostKeyAlias pos-{}\n  UserKnownHostsFile {known_hosts}\n  StrictHostKeyChecking yes\n  BatchMode yes\n  \
                  ForwardAgent no\n",
                 session.alias,
                 20000 + session.device_id,
+                session.user.as_deref().unwrap_or("support"),
                 quoted(&self.ssh),
                 quoted(&self.config_file()),
                 quoted(&self.session_key(session.device_id)),
@@ -351,6 +355,7 @@ mod tests {
             alias: alias.into(),
             host_key: HOST_KEY.into(),
             started: started.into(),
+            user: None,
         }
     }
 
@@ -433,7 +438,7 @@ mod tests {
             slashed(ws.operator_key.clone())
         );
         let pos = format!(
-            "Host pos-000-test\n  HostName localhost\n  Port 20001\n  User support\n  ProxyCommand \"ssh\" -F \"{}\" -W \"[%h]:%p\" posctl-relay\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  HostKeyAlias pos-1\n  UserKnownHostsFile \"{hosts}\"\n  StrictHostKeyChecking yes\n  BatchMode yes\n  ForwardAgent no\n",
+            "Host pos-000-test\n  HostName localhost\n  Port 20001\n  User \"support\"\n  ProxyCommand \"ssh\" -F \"{}\" -W \"[%h]:%p\" posctl-relay\n  IdentityFile \"{}\"\n  IdentitiesOnly yes\n  HostKeyAlias pos-1\n  UserKnownHostsFile \"{hosts}\"\n  StrictHostKeyChecking yes\n  BatchMode yes\n  ForwardAgent no\n",
             slashed(ws.config_file()),
             slashed(ws.session_key(1))
         );
