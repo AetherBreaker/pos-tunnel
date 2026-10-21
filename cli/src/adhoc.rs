@@ -238,12 +238,35 @@ fn install_openssh() -> Result<()> {
     let mut response = ureq::get(MSI_URL)
         .call()
         .context("downloading the OpenSSH MSI")?;
-    let msi = response
-        .body_mut()
-        .with_config()
-        .limit(64 << 20)
-        .read_to_vec()
-        .context("downloading the OpenSSH MSI")?;
+    let size = response.body().content_length();
+    let mut reader = response.body_mut().with_config().limit(64 << 20).reader();
+    let mut msi = Vec::new();
+    let mut chunk = vec![0; 64 << 10];
+    let mut shown = None;
+    // One line rewritten in place (`\r`); a terminal that doesn't honour it gets a line per percent.
+    let mb = |bytes: usize| bytes as f64 / 1_048_576.0;
+    loop {
+        let read =
+            std::io::Read::read(&mut reader, &mut chunk).context("downloading the OpenSSH MSI")?;
+        if read == 0 {
+            break;
+        }
+        msi.extend_from_slice(&chunk[..read]);
+        if let Some(size) = size.filter(|&size| size > 0) {
+            let percent = msi.len() as u64 * 100 / size;
+            if shown != Some(percent) {
+                shown = Some(percent);
+                eprint!(
+                    "\rDownloading OpenSSH: {percent}% ({:.1} of {:.1} MB)",
+                    mb(msi.len()),
+                    mb(size as usize)
+                );
+            }
+        }
+    }
+    if shown.is_some() {
+        eprintln!();
+    }
     let pinned = |bytes: &[u8]| {
         let digest: String = Sha256::digest(bytes)
             .iter()
@@ -279,11 +302,24 @@ fn install_openssh() -> Result<()> {
     if !pinned(&written) {
         bail!("the OpenSSH MSI changed on disk after its download");
     }
-    let status = Command::new("msiexec")
+    let mut msiexec = Command::new("msiexec")
         .arg("/i")
         .arg(&path)
         .args(["/qn", "/norestart"])
-        .status()?;
+        .spawn()?;
+    // msiexec reports no progress to a console: the time so far, so a slow install doesn't look hung.
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = msiexec.try_wait()? {
+            break status;
+        }
+        eprint!("\rInstalling OpenSSH... {}s", started.elapsed().as_secs());
+        std::thread::sleep(Duration::from_secs(1));
+    };
+    eprintln!(
+        "\rInstalling OpenSSH... done in {}s",
+        started.elapsed().as_secs()
+    );
     drop(held);
     let _ = fs::remove_file(&path);
     if !matches!(status.code(), Some(0 | 3010)) {
