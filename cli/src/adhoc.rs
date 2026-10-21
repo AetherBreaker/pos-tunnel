@@ -244,26 +244,41 @@ fn install_openssh() -> Result<()> {
         .limit(64 << 20)
         .read_to_vec()
         .context("downloading the OpenSSH MSI")?;
-    let digest: String = Sha256::digest(&msi)
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect();
-    if digest != MSI_SHA256 {
+    let pinned = |bytes: &[u8]| {
+        let digest: String = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02X}"))
+            .collect();
+        digest == MSI_SHA256
+    };
+    if !pinned(&msi) {
         bail!("the downloaded OpenSSH MSI doesn't match its pinned SHA256");
     }
-    // Run elevated from a folder the account's unelevated processes can write: created new, and
-    // held open with no write or delete sharing until msiexec is done, so nothing swaps it after the
-    // check.
+    // Run elevated from a folder the account's unelevated processes can write. Reopened read-only
+    // with only read sharing (msiexec can't open a file anyone holds for writing, exit 1619), hashed
+    // again through that handle, and held until msiexec is done: nothing can swap it after the check.
     let path = std::env::temp_dir().join(format!("posctl-OpenSSH-{}.msi", std::process::id()));
     let _ = fs::remove_file(&path);
+    std::io::Write::write_all(
+        &mut fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("creating {}", path.display()))?,
+        &msi,
+    )?;
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.read(true);
     #[cfg(windows)]
     std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1); // FILE_SHARE_READ
     let mut held = options
         .open(&path)
-        .with_context(|| format!("creating {}", path.display()))?;
-    std::io::Write::write_all(&mut held, &msi)?;
+        .with_context(|| format!("opening {}", path.display()))?;
+    let mut written = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut written)?;
+    if !pinned(&written) {
+        bail!("the OpenSSH MSI changed on disk after its download");
+    }
     let status = Command::new("msiexec")
         .arg("/i")
         .arg(&path)
