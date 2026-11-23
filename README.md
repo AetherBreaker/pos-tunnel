@@ -215,9 +215,10 @@ For a Windows machine NinjaOne doesn't manage:
 
 - `serve` uses `C:\Program Files\OpenSSH` or Windows' own OpenSSH Server. With neither, it installs
   the Win32-OpenSSH MSI `Setup.ps1` pins (SHA256 checked) and leaves its `sshd` service stopped and
-  Manual. Its own `sshd` runs in the console as the console's account, on loopback only, with only
-  the session's key authorized. Its key files live in `%LOCALAPPDATA%\posctl\serve`. One `serve` per
-  account at a time.
+  Manual. Every run turns off a stopped `sshd` service's restart on failure, which the MSI sets: a
+  `sshd` that can't start would otherwise restart many times a second until a reboot. Its own `sshd`
+  runs in the console as the console's account, on loopback only, with only the session's key
+  authorized. Its key files live in `%LOCALAPPDATA%\posctl\serve`. One `serve` per account at a time.
 - Run as SYSTEM (a RustDesk terminal), `serve` runs that `sshd` as the `sshd` service instead, its
   `ImagePath` pointed at this run's config and log (echoed to the console): sshd's per-connection
   processes run as `NT SERVICE\sshd` and can't open a SYSTEM console's desktop. SYSTEM can't log in

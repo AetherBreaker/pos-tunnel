@@ -185,6 +185,9 @@ pub fn serve(relay: &config::Relay) -> Result<()> {
             "the sshd service is running on this machine, and posctl serve as SYSTEM needs it: stop it (Stop-Service sshd), or run posctl serve from an elevated console on the desktop"
         );
     }
+    if cfg!(windows) {
+        powershell(NO_RESTART).context("turning off the sshd service's restart on failure")?;
+    }
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     // Held, never written, until this process ends: see `watch`.
@@ -219,6 +222,20 @@ if ($i -like '*\posctl\serve\*') {
     Stop-Service sshd -Force -ErrorAction SilentlyContinue
     Set-ItemProperty -LiteralPath $k -Name ImagePath -Value ($i -replace '^("[^"]+").*', '$1')
 } elseif ((Get-Service sshd -ErrorAction SilentlyContinue).Status -eq 'Running') { 'busy' }
+"#;
+
+/// The MSI has the sshd service restart sshd at once whenever it exits, so a sshd that can't start
+/// (unreadable config, port taken) restarts ~15 times a second until a reboot: a service between
+/// crash and restart is START_PENDING, which `Stop-Service` can't stop. Off, as Setup.ps1 sets it on
+/// the POSes, before a SYSTEM `serve` starts the service and on machines an older posctl left as the
+/// MSI did. A running service isn't this run's (RESTORE_SERVICE has stopped a SYSTEM run's), so it's
+/// left alone. PowerShell 5.1 drops an empty native argument; '""' reaches sc.exe as one.
+const NO_RESTART: &str = r#"
+$s = Get-Service sshd -ErrorAction SilentlyContinue
+if ($s -and $s.Status -ne 'Running') {
+    $null = sc.exe failure sshd reset= 0 actions= '""'
+    if ($LASTEXITCODE) { throw "sc.exe failure sshd exited $LASTEXITCODE" }
+}
 "#;
 
 /// `posctl serve-watch`, which `serve` starts detached with a pipe on its stdin. The pipe reaches EOF
@@ -328,12 +345,10 @@ fn install_openssh() -> Result<()> {
     // every interface, passwords.
     if !ssh_dir.join("sshd_config").exists() {
         fs::create_dir_all(&ssh_dir)?;
-        fs::write(
-            ssh_dir.join("sshd_config"),
-            "ListenAddress 127.0.0.1\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n",
-        )?;
-        // As Setup.ps1: SYSTEM and Administrators full control, Authenticated Users read.
-        let _ = Command::new("icacls")
+        // As Setup.ps1: SYSTEM and Administrators full control, Authenticated Users read, set on the
+        // folder before the file is written so the file inherits it. Not /T: on a file the (OI)(CI)
+        // grants leave an empty ACL (icacls still exits 0), so the service can't read its config.
+        let icacls = Command::new("icacls")
             .arg(&ssh_dir)
             .args([
                 "/inheritance:r",
@@ -341,10 +356,20 @@ fn install_openssh() -> Result<()> {
                 "*S-1-5-18:(OI)(CI)F",
                 "*S-1-5-32-544:(OI)(CI)F",
                 "*S-1-5-11:(OI)(CI)RX",
-                "/T",
                 "/Q",
             ])
-            .output();
+            .output()?;
+        if !icacls.status.success() {
+            bail!(
+                "setting the ACL of {}: icacls exited {}",
+                ssh_dir.display(),
+                icacls.status
+            );
+        }
+        fs::write(
+            ssh_dir.join("sshd_config"),
+            "ListenAddress 127.0.0.1\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n",
+        )?;
     }
     let mut response = ureq::get(MSI_URL)
         .call()
@@ -435,6 +460,17 @@ fn install_openssh() -> Result<()> {
     let _ = fs::remove_file(&path);
     if !matches!(status.code(), Some(0 | 3010)) {
         bail!("installing OpenSSH failed: msiexec exited {status}");
+    }
+    // Before the stop, which a crash loop would outlast (`NO_RESTART`). Rust passes the empty
+    // argument as `""`.
+    let failure = Command::new("sc.exe")
+        .args(["failure", "sshd", "reset=", "0", "actions=", ""])
+        .output()?;
+    if !failure.status.success() {
+        bail!(
+            "turning off the sshd service's restart on failure: sc.exe exited {}",
+            failure.status
+        );
     }
     // Manual, as on the POSes: started only by a SYSTEM `serve`, for its session (`Server`).
     let _ = Command::new("sc.exe")
